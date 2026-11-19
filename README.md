@@ -12,7 +12,7 @@ text while the answer is generated.
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining))
 - Status: complete and tested end to end with a fake model, but **built without an Anthropic API key**: no real
   Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible,
-  and the eval passed with it over the full stack; what has run live: [Verification status](#verification-status); what remains:
+  and has run live; results: [Verification status](#verification-status); what remains:
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
 - Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–18:20 by commit times; the task
   agents themselves reported ~4 h 45), plus brainstorm/planning before that and code review after (total session
@@ -233,9 +233,13 @@ Claude (no key).
 ## Eval
 
 ```sh
-docker compose up --build -d   # with MODEL_PROVIDER=anthropic + ANTHROPIC_API_KEY (or gemini + GEMINI_API_KEY) in .env
-pnpm eval                      # EVAL_BASE_URL (default http://localhost:3000); EVAL_VERBOSE=1 prints each answer
+pnpm install                          # tsx (runs the eval script) is a dev dependency
+docker compose up --build -d --wait   # MODEL_PROVIDER=anthropic + ANTHROPIC_API_KEY (or gemini + GEMINI_API_KEY) in .env
+pnpm eval                             # EVAL_BASE_URL (default http://localhost:3000); EVAL_VERBOSE=1 prints each answer
 ```
+
+`--wait` returns once the API's healthcheck passes; the eval does not retry its first connection, so without it an
+eval started straight after `up -d` can get a connection error and exit 2.
 
 `scripts/eval.ts` drives the running API over HTTP: it uploads `samples/harbor-archive.md`, waits for `ready`, asks
 the questions in [`samples/eval-questions.json`](samples/eval-questions.json) (a follow-up chain "How many questions
@@ -246,8 +250,8 @@ slicing the stored content to its quote. It prints a table and exits 1 if any an
 fails: API down, document failed, timeout). The assertions (`scripts/eval-check.ts`) are unit-tested, and the
 harness runs in `pnpm test` against a listening app with the fake model (`test/integration/eval-harness.test.ts`).
 
-**Results:** 7/7 with Gemini (`gemini-3.5-flash-lite`) against the compose stack on 2026-11-19, see
-[Verification status](#verification-status); never run against real Claude (no Anthropic key). Against the fake model
+**Results:** live with Gemini, see [Verification status](#verification-status); never run against real Claude (no
+Anthropic key). Against the fake model
 (harness check only) it reports 0/7 with exit code 1, as expected, because the demo model cites the document's first
 sentence for every question; an unreachable `EVAL_BASE_URL` gives exit code 2. The sample document is sent whole
 (`full` mode), so the eval does not cover `ranked` retrieval.

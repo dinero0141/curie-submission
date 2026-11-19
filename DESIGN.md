@@ -11,7 +11,7 @@ shapes, statuses and error codes: [docs/API.md](docs/API.md). Assumed Claude Cit
 >
 > Later addition: Google Gemini as a second real provider (`MODEL_PROVIDER=gemini`), because a free Gemini key makes a
 > live run possible where no paid Claude key was available. Claude stays the default; the Anthropic path is unchanged.
-> What has run live with Gemini: [Complete vs remaining](#complete-vs-remaining). The Claude path has still never been
+> What has run live with Gemini: [Live results](#live-results). The Claude path has still never been
 > called live.
 
 ## Assumptions
@@ -210,7 +210,7 @@ a full disk (the Task 1 agent stopped at 16:17 and resumed after the human appro
 Task 1's 36 min) and a hung Docker Desktop backend that had to be force-restarted.
 
 ## Complete vs remaining
-Complete (plan Tasks 1–14, except the live Claude parts of Tasks 4 and 12; everything tested with the fake model, and run live with Gemini as in item 1 below):
+Complete (plan Tasks 1–14, except the live Claude parts of Tasks 4 and 12; everything tested with the fake model; the happy path (full-mode answers, not-found, a follow-up, a 503 retry) also run live with Gemini, see [Live results](#live-results)):
 - Add Markdown or plain-text documents; asynchronous preparation with `ready`, or `failed` plus a reason code.
 - Multi-turn conversations about one document; one answer in flight per conversation, enforced by the database.
 - Answers grounded through Citations over sentence blocks; every quote re-verified against the stored content and located by UTF-16 offsets; explicit not-found (`answerable: false`).
@@ -218,21 +218,23 @@ Complete (plan Tasks 1–14, except the live Claude parts of Tasks 4 and 12; eve
 - Retrieval: whole document when it fits the budget, otherwise ranked full-text search (current + previous question, OR tsquery, top 8 + neighbours), leading passages when there is nothing to search for.
 - Failure classification, retries, processor-owned terminal state, reconciler for lost and stalled jobs.
 - Docker Compose for the whole stack; README, this file, the API spec.
-- `pnpm eval` (`scripts/eval.ts`): drives the HTTP API with `samples/eval-questions.json` and asserts the expected not-found outcome or an expected substring in a verified citation quote. Run live with Gemini (item 1 below); never against real Claude.
-- Gemini as a second provider (`MODEL_PROVIDER=gemini`, added after Task 14): sentence-numbered passages + structured JSON output mapped into the same `resolveCitations` verification; `pnpm smoke` (`scripts/smoke.ts`) as the few-request live check for either provider. Tested with a stubbed `fetch`; live status in item 1 below.
+- `pnpm eval` (`scripts/eval.ts`): drives the HTTP API with `samples/eval-questions.json` and asserts the expected not-found outcome or an expected substring in a verified citation quote. Run live with Gemini ([Live results](#live-results)); never against real Claude.
+- Gemini as a second provider (`MODEL_PROVIDER=gemini`, added after Task 14): sentence-numbered passages + structured JSON output mapped into the same `resolveCitations` verification; `pnpm smoke` (`scripts/smoke.ts`) as the few-request live check for either provider. Tested with a stubbed `fetch`; live status in [Live results](#live-results).
+
+### Live results
+
+Gemini `gemini-3.5-flash-lite`, free key, 2026-11-19: `pnpm smoke` **3/3** (model called directly); `pnpm eval`
+**7/7** against the compose stack (HTTP API, BullMQ worker, Postgres, Redis), the follow-up and both not-found
+questions included; two live 503s retried to completion. Records:
+[smoke](docs/notes/manual-checks.md#2026-11-19--live-gemini-smoke-run-gemini-35-flash-lite),
+[eval](docs/notes/manual-checks.md#2026-11-19--live-full-stack-eval-gemini-35-flash-lite); API facts they showed:
+[gemini-notes.md](docs/notes/gemini-notes.md). The Claude path has never been called live.
 
 What remains, in priority order:
-1. **Run with a real Claude key; see Gemini's failure paths.** Live so far, all with Gemini on 2026-11-19 (free key,
-   `gemini-3.5-flash-lite`): `pnpm smoke` passed 3/3 calling the model directly, and the eval passed **7/7 against the
-   compose stack** (HTTP API, BullMQ worker, Postgres, Redis), including the follow-up in one conversation and both
-   not-found questions, every quote at offsets that slice the stored content to it; two answers hit a live 503
-   UNAVAILABLE and completed on the BullMQ retry (records:
-   [smoke](docs/notes/manual-checks.md#2026-11-19--live-gemini-smoke-run-gemini-35-flash-lite),
-   [eval](docs/notes/manual-checks.md#2026-11-19--live-full-stack-eval-gemini-35-flash-lite); facts they showed:
-   [gemini-notes.md](docs/notes/gemini-notes.md)). Still unobserved with Gemini: `ranked` retrieval with a real
+1. **Run with a real Claude key; see Gemini's failure paths.** Still unobserved with Gemini: `ranked` retrieval with a real
    model (the sample is always sent whole), 429/quota bodies (`RetryInfo`/`QuotaFailure`), `MAX_TOKENS`,
    safety/recitation blocks, `context_too_large`, the reconciler under a real outage, and `gemini-3.8-flash` with
-   `thinkingLevel: low` (it only ever answered 503). The Claude path has never been called live. With an Anthropic key: `pnpm spike`, then compare `docs/notes/spike-output/` with each UNVERIFIED fact in
+   `thinkingLevel: low` (it only ever answered 503). With an Anthropic key: `pnpm spike`, then compare `docs/notes/spike-output/` with each UNVERIFIED fact in
    [citations-spike.md](docs/notes/citations-spike.md) and mark it confirmed or fix the mapping (and its tests) where
    it differs. Then `pnpm eval` against `docker compose up --build` with `MODEL_PROVIDER=anthropic`, record the table
    in the manual checks and the README, and tune `effort`. Until this is done, grounding with real Claude is unproven. A wrong
@@ -270,7 +272,7 @@ Automated (`pnpm test`: 363 tests, 21 files, all passing; `pnpm typecheck` clean
 
 `FakeModel` replaces the network: scripted replies by question, per-attempt errors, a latch to hold an answer mid-stream, and every request recorded so tests can assert what history was sent. Its citations go through the same verification as real ones.
 
-Manual checks ([docs/notes/manual-checks.md](docs/notes/manual-checks.md)): the compose stack with `MODEL_PROVIDER=fake`, the curl flow from upload to follow-up, offsets sliced against `GET /documents/:id/content`, error responses, clean shutdown. In Task 10 the README example flow was run again against a freshly built stack, plus a failed document (`empty_after_parse`) and the 409 for asking about it. In Task 12 the eval CLI was run once against the compose stack with `MODEL_PROVIDER=fake`: it ran end to end and reported 0/7 with exit code 1, as expected for the demo model (a harness check only), and exit code 2 for an unreachable API. The live Gemini runs (smoke, then the eval against the compose stack) are recorded there too; their results are in item 1 of [Complete vs remaining](#complete-vs-remaining).
+Manual checks ([docs/notes/manual-checks.md](docs/notes/manual-checks.md)): the compose stack with `MODEL_PROVIDER=fake`, the curl flow from upload to follow-up, offsets sliced against `GET /documents/:id/content`, error responses, clean shutdown. In Task 10 the README example flow was run again against a freshly built stack, plus a failed document (`empty_after_parse`) and the 409 for asking about it. In Task 12 the eval CLI was run once against the compose stack with `MODEL_PROVIDER=fake`: it ran end to end and reported 0/7 with exit code 1, as expected for the demo model (a harness check only), and exit code 2 for an unreachable API. The live Gemini runs (smoke, then the eval against the compose stack) are recorded there too; their results: [Live results](#live-results).
 
 Acceptance checklist (Task 13, refreshed after the code review; tests on `FakeModel`):
 
@@ -279,7 +281,7 @@ Acceptance checklist (Task 13, refreshed after the code review; tests on `FakeMo
 | Add a document, Markdown and plain text | `documents`, `chunking` |
 | Async preparation; `ready` or why it failed | `documents`, `conversations` (failed document → 409) |
 | Multi-turn conversation about one document | `conversations`, `retrieval`, `failures` |
-| Answers only from that document; quotes in it and locatable | `citations`, `conversations`, `retrieval` (real Claude: not verified; live with Gemini: item 1 of [Complete vs remaining](#complete-vs-remaining)) |
+| Answers only from that document; quotes in it and locatable | `citations`, `conversations`, `retrieval` (real Claude: not verified; live with Gemini: [Live results](#live-results)) |
 | Clear "not in this document" | `conversations`, `citations`, `retrieval` (partial search), `failures` (truncation is not "not found") |
 | Answer delivered while it takes time (progressive polling) | `conversations` (latched model), `failures` (partial text cleared on retry/refusal), `partial-writer` |
 | Edge cases | `chunking`, `citations`, `llm-errors`, `anthropic-model`, `documents` (400/404/413/415, NUL/surrogates, hanging enqueue, late-failure races), `conversations` (hanging/failing enqueue, concurrency), `failures`, `reconciler`, `retrieval` |
@@ -293,7 +295,7 @@ Not verified: no real Claude call (shapes assumed, spike not run, eval not run a
 - Delegation: implementation ran as sequential task subagents, one per plan task with a fresh context. Each had to write tests and pass `pnpm test` and `pnpm typecheck` before committing, and log what it did to a progress file. The orchestrator prompt (the `planning:exec` workflow) gave each agent one plan task, a fresh context, the plan and progress-file paths, and the validation commands; after the tasks, review agents (quality, implementation, testing, simplification, documentation) reviewed the whole diff, and a fix agent verified each finding against the code.
 - Code review outcome: review phase 1 reported 57 findings (1 critical, 9 major, 47 minor). The critical one was real: the ATX-heading and table-separator regexes in chunking backtracked quadratically, so one upload with a long line could block a worker for hours. Also fixed: a `max_tokens` cut reported as "not in the document", NUL/surrogates in `title`/`question` giving a 500, internal error text exposed to clients, a too-short compose stop grace period, `text/plain` not being a 415, vacuous or order-dependent tests, and missing tests for the reconciler race, concurrent questions, enqueue failures on the conversation routes, `PartialWriter` and mid-stream SSE errors (222 → 252 tests). The fixes are in the commit `fix: address code review findings`; the progress log lists each finding as fixed or not, with the reason. Review phase 1 iteration 2 (5 major findings, all fixed, 252 → 255 tests): a reply whose citations were all dropped (or that cited nothing) was shown as "not in the document" (now `citations_unverified`); headings were unbounded and uncounted though copied into every passage and sent as titles (now capped and counted); the api and worker services had no restart policy (now `unless-stopped`).
 - Gemini provider (after Task 14): the human chose Gemini's free tier as a way to make a live run possible without a paid Claude key; the design (sentence ids in the prompt, structured output mapped into `content_block_location`, plain `fetch`, smoke script) was settled in the session before implementation. Google's API docs were researched from the web in the same session (findings with sources and confidence in [gemini-notes.md](docs/notes/gemini-notes.md)); one implementation agent wrote the adapter, tests and docs. An independent review then found 12 issues, all fixed with tests (335 → 363 tests): the smoke follow-up was sent the not-found budget turn as history instead of the keyword turn (history is now chosen by `followUpOf` in the unit-tested `smokeHistory`); a blank answer with verified citations completed with empty content; every Gemini 429 retried after 1 s and 2 s whatever its `RetryInfo`, and a zero-quota 429 was retried; `ESCALATION`, `IMAGE_OTHER` and `PUP_LIMITED_DISABLED` were not handled; `thinkingLevel: low` raised Flash-Lite thinking above its `minimal` default; a `models/` prefix in `GEMINI_MODEL` broke the URL; and tests that compared the schema, the refusal set and the factory wiring against the code itself.
-- Live runs (Gemini, 2026-11-19): the human put a free AI Studio key in the dotenv file; the orchestrator session (a Claude Code agent) first ran `pnpm smoke` and a scratch probe script that POSTed to `generateContent` (both loaded the key from the dotenv file themselves), then, after the human asked for the eval, started the compose stack (the containers read the key through `env_file`) and ran `pnpm exec tsx scripts/eval.ts` against it, checking the database and the worker log afterwards; documentation agents recorded both runs from the orchestrator's evidence notes. Results: item 1 of [Complete vs remaining](#complete-vs-remaining). No adapter change was needed; after the smoke run the default model was switched to `gemini-3.5-flash-lite`.
+- Live runs (Gemini, 2026-11-19): the human put a free AI Studio key in the dotenv file; the orchestrator session (a Claude Code agent) first ran `pnpm smoke` and a scratch probe script that POSTed to `generateContent` (both loaded the key from the dotenv file themselves), then, after the human asked for the eval, started the compose stack (the containers read the key through `env_file`) and ran `pnpm exec tsx scripts/eval.ts` against it, checking the database and the worker log afterwards; documentation agents recorded both runs from the orchestrator's evidence notes. Results: [Live results](#live-results). No adapter change was needed; after the smoke run the default model was switched to `gemini-3.5-flash-lite`.
 - These documents were drafted by the Task 10 agent from the code, the plan and the manual-check notes, extended by the Task 11–13 agents, finalised in Task 14 and corrected after the code review.
 - Agent rules: [CLAUDE.md](CLAUDE.md) grew during the run: Stack, Invariants, Database and Workflow came from Tasks 1–8 and were what the task agents worked under; the "Patterns (learned while building)" and "Agent environment" sections were written in Task 14 as a summary for future agents and were not given to Tasks 1–13 (Commands and Debugging were added after the code review). The rules: the stack, the invariants (UTF-16 `[start, end)` offsets into never-mutated content, slicing only in JS, quotes only from Citations re-verified against `content.slice`, slow work only in workers, the processor owns terminal state, one error envelope), database rules (idempotent migrations, guarded transitions, the test harness) and workflow rules (one task per run, tests for every change, never claim verification that was not run, a DESIGN bullet per decision).
 - How the work was checked: after Tasks 4–9 the orchestrator re-ran `pnpm typecheck` and `pnpm test` itself (180/180 passing, 13 files) instead of trusting the agents' reports. Unverified work had to be marked in the plan, not reported as done.

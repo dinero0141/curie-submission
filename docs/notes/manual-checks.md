@@ -224,7 +224,9 @@ PASS    production-latency  What was production-scale latency?                  
 A PASS means (`scripts/eval-check.ts`): the answer `completed`; for answerable rows the expected substring is inside a
 citation quote, not only in the answer text; for not-found rows `answerable: false` with no citations; and every
 citation's offsets slice the stored content to its quote. `keyword-followup` was asked in the same conversation as
-`hybrid-correct`, so its history came from the database through the worker.
+`hybrid-correct`; by design the worker builds history from the conversation's earlier rows
+(`src/jobs/generateAnswer.ts`), but the request it sent to Gemini was not logged, so the history it carried is not
+shown by this run.
 
 Two live 503s recovered by the BullMQ retry. Two answers got `Gemini API 503 UNAVAILABLE: This model is currently
 experiencing high demand…` on their first attempt (the only warn-level worker lines of the run): each logged
