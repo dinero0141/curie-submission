@@ -23,6 +23,23 @@ import type { Span } from './chunking.js';
 /** Prefix the model is told to start with when the document does not answer the question. */
 export const NOT_IN_DOCUMENT_MARKER = 'NOT_IN_DOCUMENT:';
 
+/**
+ * Marker at the start of the reply: after whitespace and Markdown emphasis/code/quote/heading characters
+ * (`**NOT_IN_DOCUMENT:**`, `` `NOT_IN_DOCUMENT:` ``, `> NOT_IN_DOCUMENT -`), any case, followed by anything but a
+ * letter or digit. Marker adherence of the real model is unknown (spike fact 16), so formatting is tolerated.
+ */
+const MARKER_AT_START = /^[\s*_`>#]*NOT_IN_DOCUMENT(?![A-Za-z0-9])/i;
+/** Marker anywhere (e.g. after a one-sentence preamble); only consulted when no citation survived. */
+const MARKER_ANYWHERE = /(?<![A-Za-z0-9])NOT_IN_DOCUMENT(?![A-Za-z0-9])/i;
+
+/**
+ * Whether the reply says the document does not answer the question. With a verified citation only a marker at
+ * the start counts (a cited answer may mention the word); without one, the marker anywhere counts.
+ */
+export function hasNotInDocumentMarker(text: string, hasVerifiedCitation: boolean): boolean {
+  return MARKER_AT_START.test(text) || (!hasVerifiedCitation && MARKER_ANYWHERE.test(text));
+}
+
 /** Displayed text when an answer is not grounded in the document. */
 export const NOT_FOUND_MESSAGE = 'I could not find an answer to this question in the document.';
 
@@ -150,7 +167,7 @@ function locate(c: RawCitation, sent: SentDocument[], content: string): Located 
 
 /**
  * Map the model's citations to verified source quotations and decide whether the answer is grounded.
- * Not answerable when the reply starts with `NOT_IN_DOCUMENT_MARKER` (after leading whitespace) or when no
+ * Not answerable when the reply carries the `NOT_IN_DOCUMENT` marker (see `hasNotInDocumentMarker`) or when no
  * citation survives verification. Only the marker is reported as "not in the document"; otherwise a
  * `max_tokens` stop is `truncated` and anything else is `unverified`.
  */
@@ -184,7 +201,7 @@ export function resolveCitations(raw: RawAnswer, sent: SentDocument[], content: 
     }
   });
 
-  const notFoundReason = rawText.trimStart().startsWith(NOT_IN_DOCUMENT_MARKER)
+  const notFoundReason = hasNotInDocumentMarker(rawText, citations.length > 0)
     ? 'not_in_document'
     : citations.length === 0
       ? raw.stopReason === 'max_tokens'

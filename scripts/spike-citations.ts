@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import Anthropic from '@anthropic-ai/sdk';
 import { ConfigError, loadConfig } from '../src/config.js';
 import { chunkDocument, type Passage } from '../src/domain/chunking.js';
+import { hasNotInDocumentMarker, NOT_IN_DOCUMENT_MARKER } from '../src/domain/citations.js';
 import { loadEnvFile } from '../src/loadEnv.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -191,7 +192,9 @@ async function main(): Promise<void> {
         allInRange: checks.every((c) => c.inRange),
         allConcat: checks.every((c) => c.citedTextEqualsConcat),
         multiBlock: checks.filter((c) => c.endBlock - c.startBlock > 1).length,
-        notInDocument: text.trimStart().startsWith('NOT_IN_DOCUMENT:'),
+        // Marker adherence: `notInDocument` is what the service accepts, `markerExact` is the instructed format.
+        notInDocument: hasNotInDocumentMarker(text, false),
+        markerExact: text.trimStart().startsWith(NOT_IN_DOCUMENT_MARKER),
         firstTextMs,
         totalMs,
         inTok: message.usage.input_tokens,

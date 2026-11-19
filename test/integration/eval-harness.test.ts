@@ -50,7 +50,8 @@ const correct = new FakeModel([
   { match: 'next review', reply: answer('8 April 2026.', '8 April 2026') },
   { match: 'median response time', reply: answer('1.2 seconds.', '1.2 seconds') },
   { match: 'who funded', reply: { text: 'NOT_IN_DOCUMENT: funding is not mentioned.' } },
-  { match: 'production-scale', reply: { text: 'NOT_IN_DOCUMENT: not reported.' } },
+  // A formatted marker (bold) must still score as not found.
+  { match: 'production-scale', reply: { text: '**NOT_IN_DOCUMENT:** not reported.' } },
 ]);
 /** Unscripted: the demo answer (first sentence, cited) for every question. */
 const demo = new FakeModel();

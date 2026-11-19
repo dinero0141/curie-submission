@@ -245,6 +245,35 @@ describe('resolveCitations — not answerable', () => {
     }
   });
 
+  it('accepts a formatted or preceded marker when no citation survived', () => {
+    for (const text of [
+      '**NOT_IN_DOCUMENT:** the note does not give the team size.',
+      '`NOT_IN_DOCUMENT:` the note does not give the team size.',
+      '> NOT_IN_DOCUMENT: not stated.',
+      '## NOT_IN_DOCUMENT - not stated.',
+      '__NOT_IN_DOCUMENT__: not stated.',
+      'not_in_document: not stated.',
+      'NOT_IN_DOCUMENT not stated.',
+      'NOT_IN_DOCUMENT',
+      'I checked the passages. NOT_IN_DOCUMENT: the team size is not given.',
+    ]) {
+      const r = resolveCitations(answer({ text }), docs, content);
+      expect(r, text).toMatchObject({ answerable: false, text: NOT_FOUND_MESSAGE, citations: [], notFoundReason: 'not_in_document' });
+      expect(r.rawText).toBe(text);
+    }
+  });
+
+  it('treats a formatted marker at the start as not-found even with a verified citation', () => {
+    const r = resolveCitations(answer({ text: '**NOT_IN_DOCUMENT:** no.', citations: [cite(docs, results, 0, 1)] }), docs, content);
+    expect(r).toMatchObject({ answerable: false, citations: [], notFoundReason: 'not_in_document' });
+  });
+
+  it('does not take a longer word containing the marker as the marker', () => {
+    for (const text of ['NOT_IN_DOCUMENTS: x', 'XNOT_IN_DOCUMENT: x', 'NOT_IN_DOCUMENT2 x']) {
+      expect(resolveCitations(answer({ text }), docs, content).notFoundReason, text).toBe('unverified');
+    }
+  });
+
   it('reports a reply with no citations as unverified, not as not-in-document', () => {
     const r = resolveCitations(answer({ text: 'The team had twelve people.' }), docs, content);
     expect(r).toMatchObject({ answerable: false, text: '', citations: [], notFoundReason: 'unverified' });
@@ -294,5 +323,12 @@ describe('resolveCitations — not answerable', () => {
       content,
     );
     expect(r.answerable).toBe(true);
+    // Also after a preamble: with a verified citation only a marker at the start counts.
+    const preamble = resolveCitations(
+      answer({ text: `I checked. ${NOT_IN_DOCUMENT_MARKER} no.`, citations: [cite(docs, results, 0, 1)] }),
+      docs,
+      content,
+    );
+    expect(preamble.answerable).toBe(true);
   });
 });
