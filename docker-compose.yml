@@ -6,7 +6,8 @@
 #
 # MODEL_PROVIDER: shell value > `.env` value (compose reads `.env` for `${...}` interpolation) > `fake`.
 # So with no `.env` (or no MODEL_PROVIDER in it) the stack runs keyless with the scripted demo model.
-# For real Claude answers set MODEL_PROVIDER=anthropic and ANTHROPIC_API_KEY in `.env`.
+# For real answers set MODEL_PROVIDER=anthropic and ANTHROPIC_API_KEY (Claude), or MODEL_PROVIDER=gemini and
+# GEMINI_API_KEY (Google Gemini; GEMINI_MODEL optional) in `.env`; env_file passes them to the containers.
 
 x-app-env: &app-env
   DATABASE_URL: postgres://curie:curie@postgres:5432/curie

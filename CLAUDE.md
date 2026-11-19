@@ -45,6 +45,7 @@ Rules given to the coding agents that implement this repo. The plan lives in `do
 - Timing-dependent behaviour takes options (`staleAfterMs`, `intervalMs`, `partialWriteMs`, backoff overrides in `createQueues`) so tests age rows or shorten delays instead of sleeping.
 - Full-text search: stem once. The OR query re-parses the `english` tsquery with the `simple` config; never run user text through `english` twice. Keep search SQL in `src/db/search.ts` and the selection policy pure in `src/domain/retrieval.ts`.
 - The Citations shapes are assumptions recorded in `docs/notes/citations-spike.md`. If code depends on a new shape detail, add it there with its source and status, and keep `resolveCitations` defensive (drop, never repair).
+- Provider adapters map their output into `RawAnswer` blocks with `content_block_location` citations (Gemini: `passage` → `document_index`, inclusive `lastSentence` → exclusive `end_block_index`, model quote → `cited_text`), passing values through untouched, so `resolveCitations` stays the single verifier. Gemini errors are `GeminiApiError` / `GeminiConnectionError` (classified in `classifyError`); test `GeminiModel` through a stubbed `fetch`. Its API facts live in `docs/notes/gemini-notes.md` (record new ones there with source and status).
 - Docs: JSON examples are captured from the running stack (`docs/notes/manual-checks.md`); label anything that is only the code/test shape. Link README → DESIGN → `docs/API.md` → `docs/notes/*` instead of repeating content.
 
 ## Agent environment

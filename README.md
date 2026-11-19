@@ -11,7 +11,9 @@ text while the answer is generated.
 - Recording: **pending** (link to be added before submission; tracked in
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining))
 - Status: complete and tested end to end with a fake model, but **built without an Anthropic API key**: no real
-  Claude call has been made. See [Verification status](#verification-status) and
+  Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible;
+  it has not been run against the live API yet either (`pnpm smoke` is the check). See
+  [Verification status](#verification-status) and
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
 - Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–18:20 by commit times; the task
   agents themselves reported ~4 h 45), plus brainstorm/planning before that and code review after (total session
@@ -31,7 +33,8 @@ docker compose up --build
 ```
 
 With no `.env` file this runs keyless with the fake model. To use Claude, create a repo-root `.env` first (copy
-`.env.example` if your checkout has it, or this block) and fill in the key:
+`.env.example` if your checkout has it, or this block) and fill in the key. For Gemini instead, see the lines after
+the block.
 
 ```sh
 MODEL_PROVIDER=anthropic
@@ -48,6 +51,16 @@ MAX_DOCUMENT_BYTES=5242880
 LOG_LEVEL=info
 ```
 
+For Gemini (free key from Google AI Studio, see
+[docs/notes/gemini-notes.md § How to verify](docs/notes/gemini-notes.md#how-to-verify)), replace the first three lines
+with:
+
+```sh
+MODEL_PROVIDER=gemini
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.8-flash
+```
+
 This starts Postgres 16, Redis 7, a one-shot `migrate`, the API on http://localhost:3000 and the worker. Host ports:
 API 3000 (`API_PORT` overrides), Postgres 54329, Redis 63799.
 
@@ -57,11 +70,13 @@ Stop everything with `docker compose down` (add `-v` to drop the database volume
 
 | Variable | Default | Notes |
 |---|---|---|
-| `MODEL_PROVIDER` | `anthropic` in the app; **`fake` under compose** | `anthropic` = Claude via the Messages API with Citations; `fake` = scripted demo model, no network |
+| `MODEL_PROVIDER` | `anthropic` in the app; **`fake` under compose** | `anthropic` = Claude via the Messages API with Citations; `gemini` = Google Gemini via `generateContent` with structured JSON output over sentence-numbered passages, verified by the same citation checks; `fake` = scripted demo model, no network |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_PROVIDER=anthropic` (the app refuses to start without it) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | The request shape (Citations, adaptive thinking, `output_config.effort`) is assumed for the default model. Another model must accept all three; unverified (keyless build) |
-| `MAX_ANSWER_TOKENS` | `1024` | Answer budget; the request adds 4096 tokens of thinking headroom |
-| `MODEL_TIMEOUT_MS` | `90000` | Deadline for one streamed answer; a timeout is retried |
+| `GEMINI_API_KEY` | — | Required when `MODEL_PROVIDER=gemini`. Free tier: Google may use prompts to improve its products, so send only documents you may share ([gemini-notes](docs/notes/gemini-notes.md), fact 23) |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Stable free-tier Flash model; `thinkingLevel: low` is sent to Gemini 3+/4 ids only. Alternatives: `gemini-3.5-flash-lite`, `gemini-4-hydrogen`. Unverified (no live call yet) |
+| `MAX_ANSWER_TOKENS` | `1024` | Answer budget; Claude adds 4096 tokens of thinking headroom, Gemini adds 2048 (JSON and copied quotes) + 4096 (thinking) |
+| `MODEL_TIMEOUT_MS` | `90000` | Deadline for one answer; a timeout is retried |
 | `FULL_CONTEXT_TOKENS` | `60000` | Documents up to this estimated size are sent whole |
 | `PASSAGE_TOKENS` | `400` | Target passage size |
 | `MAX_DOCUMENT_BYTES` | `5242880` | Upload limit (UTF-8 bytes of `content`) |
@@ -79,11 +94,14 @@ Infrastructure and tooling:
 | `EVAL_BASE_URL` / `EVAL_VERBOSE` | `http://localhost:3000` / unset | `pnpm eval` only |
 
 The block above (and `.env.example`) lists the variables without credentials and sets `MODEL_PROVIDER=anthropic`,
-so either fill in `ANTHROPIC_API_KEY` or change the provider to `fake`. A `.env` file is only needed for the
-anthropic provider. Compose resolves `MODEL_PROVIDER` as shell >
+so either fill in `ANTHROPIC_API_KEY`, switch to the Gemini lines, or change the provider to `fake`. A `.env` file
+is only needed for a real provider. Compose resolves `MODEL_PROVIDER` as shell >
 `.env` > `fake` (`docker-compose.yml`), so with no `.env` at all the stack runs keyless with the fake model, and the
 worker logs a warning saying so. Inside compose, `DATABASE_URL`/`REDIS_URL` are always
 the in-network addresses; the `.env` values are for local runs.
+
+With `MODEL_PROVIDER=gemini` an answer has no partial text: it stays `streaming` with empty `content` until it
+completes (the JSON answer arrives whole).
 
 The fake model answers every unscripted question with the document's first sentence, cited. It exercises the whole
 pipeline (queue, partial writes, citation verification, offsets) but says nothing about answer quality.
@@ -182,16 +200,31 @@ pnpm typecheck
 ```
 
 Integration tests use the `curie_test` database (created on first Postgres volume init) and fail fast with a hint if
-Postgres or Redis is down. All tests use the fake model. Current result: 264 tests in 18 files pass (163 unit,
-101 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
+Postgres or Redis is down. All tests use the fake model, or a stubbed `fetch` for the Claude and Gemini adapters (no
+network). Current result: 335 tests in 21 files pass (232 unit, 103 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
 
 `pnpm spike` (`scripts/spike-citations.ts`) sends the production request body (`toAnthropicParams(buildRequest(...))`)
 for the sample document, dumps the raw Citations responses, and needs an Anthropic key.
 
+## Smoke run (live model, few requests)
+
+```sh
+pnpm smoke   # MODEL_PROVIDER=gemini + GEMINI_API_KEY (or anthropic + ANTHROPIC_API_KEY) in .env
+```
+
+`scripts/smoke.ts` calls the configured model directly (no HTTP stack, no database) along the production path: the
+real chunker on `samples/harbor-archive.md`, `buildRequest`, `model.generate`, `resolveCitations`. Three sequential
+requests, no retries (free-tier quota): "How many of the 40 questions did keyword search answer?" (expects a verified
+quote containing "28 of the 40"), "What was the pilot's budget?" (expects not found), and the follow-up "And the hybrid
+prototype?" with the first turn as history (expects "34 of the 40"). Per question it prints the outcome, the verified
+quotes with offsets, drop reasons, stop reason, model and usage; it exits 1 if an expectation fails and 2 on a
+configuration, HTTP or network error. It refuses `MODEL_PROVIDER=fake` and never prints the key. The checks
+(`scripts/smoke-check.ts`) are unit-tested. **Not run yet** (no key in this build).
+
 ## Eval
 
 ```sh
-docker compose up --build -d   # with MODEL_PROVIDER=anthropic and ANTHROPIC_API_KEY in .env
+docker compose up --build -d   # with MODEL_PROVIDER=anthropic + ANTHROPIC_API_KEY (or gemini + GEMINI_API_KEY) in .env
 pnpm eval                      # EVAL_BASE_URL (default http://localhost:3000); EVAL_VERBOSE=1 prints each answer
 ```
 
@@ -215,8 +248,8 @@ the eval does not cover `ranked` retrieval.
 This build had **no Anthropic API key** (a deliberate decision to continue keyless). So:
 
 Verified:
-- `pnpm typecheck` and `pnpm test`: 264/264 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
-  workers in the integration tests.
+- `pnpm typecheck` and `pnpm test`: 335/335 passing, against `FakeModel` or a stubbed `fetch` (no model API is ever
+  called), with real Postgres, Redis and BullMQ workers in the integration tests.
 - The example flow above, over HTTP against the compose stack with `MODEL_PROVIDER=fake`: upload → ready → ask →
   poll → follow-up → offsets slice the stored content; plus 400/404/409/415 responses and a failed document
   (`empty_after_parse`).
@@ -237,8 +270,16 @@ Not verified:
   paper (the sample document is small enough to be sent whole).
 - `docker compose up` with `MODEL_PROVIDER=anthropic`, a `.env` overriding the `fake` default, load, and many
   concurrent workers/pollers.
+- **No real Gemini call was made either.** `GeminiModel` is unit-tested through a stubbed `fetch` (exact request
+  body, response mapping, every error class) and runs through the real generate-answer processor in an integration
+  test, but the request and response shapes are assumed from Google's docs
+  ([docs/notes/gemini-notes.md](docs/notes/gemini-notes.md) marks each fact UNVERIFIED; the structured-output field
+  spelling is the likeliest to differ).
 
-To verify with a key: set `MODEL_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in `.env`, run `pnpm spike` and compare
+To verify with a free Gemini key: follow
+[docs/notes/gemini-notes.md § How to verify](docs/notes/gemini-notes.md#how-to-verify) (`pnpm smoke`, then the eval
+against the compose stack). To verify with an Anthropic key: set `MODEL_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in
+`.env`, run `pnpm spike` and compare
 `docs/notes/spike-output/` with the facts in `docs/notes/citations-spike.md`, then run `pnpm eval` against
 `docker compose up --build` and record its table under [Eval](#eval). This is the first item of the remaining work;
 the rest (SSE, query rewrite, hybrid ranking, `retry-after`, PDF, auth) is listed in priority order in

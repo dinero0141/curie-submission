@@ -1,0 +1,78 @@
+# Gemini provider — assumed API facts (keyless run)
+
+> **Status: UNVERIFIED — not observed live.** `GeminiModel` (`src/llm/gemini.ts`) was written without a Gemini API
+> key. Every fact below comes from Google's documentation (read on 2026-11-19, when the `ai.google.dev` pages
+> redirected to `aistudio.google.com`) or, where marked, from forum or third-party reports. They are what the pages
+> *say*, not what the API was seen to do. The first `pnpm smoke` with a real key is the check; mark each fact
+> confirmed or fix the adapter (and its tests) where it differs. See [How to verify](#how-to-verify).
+
+Why Gemini, and how grounding maps onto the same verified citations: [DESIGN.md § Model integration](../../DESIGN.md#model-integration).
+The Claude equivalent of this file: [citations-spike.md](citations-spike.md).
+
+## Facts and sources
+
+| # | Fact (assumed) | Source | Status |
+|---|---|---|---|
+| 1 | The docs moved: `ai.google.dev/gemini-api/docs/*` and `ai.google.dev/api/*` 301 to `aistudio.google.com/docs/*` and `/api-reference/*`. The guides describe the newer Interactions API by default; the `generateContent` variant needs `?generate-content=true`. The two wire formats differ (Interactions: `POST /v1beta/interactions`, snake_case, `response_format`). We use `generateContent`. | https://aistudio.google.com/docs/structured-output?generate-content=true | UNVERIFIED |
+| 2 | Endpoint: `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` (non-streaming; `:streamGenerateContent` streams). All official generateContent examples use `v1beta`; the versions page calls `v1` stable, but whether `v1` accepts `responseJsonSchema` and `thinkingConfig` was not confirmed, so we send `v1beta`. | https://aistudio.google.com/api-reference/generate-content, https://aistudio.google.com/docs/api-versions | UNVERIFIED |
+| 3 | Auth: header `x-goog-api-key: <key>` with `Content-Type: application/json`. We never put the key in the URL (`?key=` would land in logs). | https://aistudio.google.com/docs/structured-output?generate-content=true (curl example) | UNVERIFIED |
+| 4 | Request: `contents[]` of `{role, parts: [{text}]}` with `role` `user` or `model`; `systemInstruction` is a Content with text parts. We send history as plain `user`/`model` turns and the passages only in the last user turn. | https://aistudio.google.com/api-reference/generate-content | UNVERIFIED |
+| 5 | Structured output: `generationConfig.responseMimeType: "application/json"` plus `responseJsonSchema` (plain JSON Schema) is what the official JS and Go SDK examples send to this endpoint, for Gemini 2.5, 3 and 4. The same page's REST curl uses a newer spelling, `generationConfig.responseFormat: {text: {mimeType: "APPLICATION_JSON", schema}}`; whether the two are interchangeable or one is deprecated is not stated. We send `responseMimeType` + `responseJsonSchema`, never the older `responseSchema` (OpenAPI subset, mutually exclusive with `responseJsonSchema` per third-party sources). **Most likely point of failure**: if the API answers 400 about an unknown field, switch `toGeminiRequest` to `responseFormat`. | https://aistudio.google.com/docs/structured-output?generate-content=true; https://discuss.ai.google.dev/t/error-in-api-reference-doco-re-generationconfig-responsejsonschema-structured-output/125182 (forum) | UNVERIFIED (conflicting docs) |
+| 6 | Structured output is supported on gemini-3.8-flash, 3.6-flash, 3.5-flash-lite, 3.1-flash-lite, the Gemini 4 family and 2.5 Pro/Flash/Flash-Lite. | https://aistudio.google.com/docs/structured-output?generate-content=true | UNVERIFIED |
+| 7 | Supported schema keywords include `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `minimum`/`maximum`, `description`, `anyOf`; unsupported ones are ignored. Large or deeply nested schemas can be rejected with 400 INVALID_ARGUMENT. Output keys follow schema key order. Our schema (`GEMINI_RESPONSE_SCHEMA`) uses only `type`, `properties`, `required`, `additionalProperties: false`, `items` and `description`, three levels deep. | https://aistudio.google.com/docs/structured-output?generate-content=true | UNVERIFIED |
+| 8 | The output is guaranteed to be valid JSON that matches the schema, but not semantically correct; validate in app code. A `MAX_TOKENS` stop leaves incomplete JSON. We parse with zod (`parseAnswerJson`) and let `resolveCitations` check every citation value. | https://aistudio.google.com/docs/structured-output?generate-content=true | UNVERIFIED |
+| 9 | `temperature`, `topP`, `topK` are silently ignored on Gemini 3.6 Flash and newer (deprecation warning headers), announced to become 400s; `candidateCount` is not supported on Gemini 3 and 4. We send none of them. | https://aistudio.google.com/docs/troubleshooting?generate-content=true, https://aistudio.google.com/api-reference/generate-content | UNVERIFIED |
+| 10 | Thinking: `generationConfig.thinkingConfig.thinkingLevel` on Gemini 3+ and 4. gemini-3.8-flash accepts `low`/`medium`/`high` (default `medium`), rejects `minimal`; Gemini 4 cannot disable thinking, and sending `thinkingBudget` with `thinkingLevel` is a 400. Gemini 2.5 takes `thinkingBudget` only and rejects `thinkingLevel`. We send `{thinkingLevel: "low"}` to `gemini-3+`/`gemini-4` ids only (`thinkingConfigFor`), nothing to other ids. The value is spelled lower-case as in the guide's REST example (the reference enum is upper-case `LOW`). | https://aistudio.google.com/docs/thinking?generate-content=true, https://aistudio.google.com/docs/models/gemini-3.8-flash | UNVERIFIED |
+| 11 | `maxOutputTokens` includes thought tokens; hitting it while thinking gives `finishReason: MAX_TOKENS` with truncated or empty output. Thought tokens are billed and reported in `usageMetadata.thoughtsTokenCount`. Hence `maxOutputTokens = MAX_ANSWER_TOKENS + 2048 (JSON and copied quotes) + 4096 (thinking)`. | https://aistudio.google.com/docs/thinking?generate-content=true | UNVERIFIED |
+| 12 | Thought summaries come back only with `includeThoughts: true`, as parts with `thought: true`; parts may carry an opaque `thoughtSignature`. We do not request them, and skip any `thought: true` part anyway. | https://aistudio.google.com/docs/thinking?generate-content=true | UNVERIFIED |
+| 13 | Response: `candidates[]` (`content.parts[].text`, `finishReason`, …), `promptFeedback {blockReason}`, `usageMetadata {promptTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount, …}`, `modelVersion`, `responseId`. We read the first candidate, store `usageMetadata` as `usage` and `modelVersion` (else the configured id) as `model`. | https://aistudio.google.com/api-reference/generate-content | UNVERIFIED |
+| 14 | `finishReason` values include STOP, MAX_TOKENS, SAFETY, RECITATION, LANGUAGE, OTHER, BLOCKLIST, PROHIBITED_CONTENT, SPII, MALFORMED_RESPONSE, IMAGE_SAFETY, IMAGE_PROHIBITED_CONTENT, IMAGE_RECITATION, … and CONTINUATION (stopped at the per-request limit, not complete). Mapping: STOP → `end_turn`; MAX_TOKENS and CONTINUATION → `max_tokens`; others lower-cased. | https://aistudio.google.com/api-reference/generate-content | UNVERIFIED |
+| 15 | Blocking finish reasons → `ModelRefusalError` → `model_refused`: SAFETY, RECITATION, BLOCKLIST, PROHIBITED_CONTENT, SPII, IMAGE_SAFETY, IMAGE_PROHIBITED_CONTENT, IMAGE_RECITATION. Risk (our inference, not documented): RECITATION is about reproducing training data, and we ask the model to copy sentences verbatim into `quote`; if it fires on ordinary documents, answers fail as `model_refused`. | https://aistudio.google.com/api-reference/generate-content | UNVERIFIED |
+| 16 | A blocked prompt returns no candidates, only `promptFeedback.blockReason` (SAFETY, OTHER, BLOCKLIST, PROHIBITED_CONTENT, IMAGE_SAFETY) → `model_refused` with category `prompt_blocked:<reason>`. No candidates and no block reason is not documented; we treat it as `stopReason: no_candidates` → `citations_unverified` (no retry: it would spend free-tier quota). | https://aistudio.google.com/api-reference/generate-content | UNVERIFIED |
+| 17 | Error body: `{"error": {"code": <HTTP status>, "message": "...", "status": "INVALID_ARGUMENT", "details": [...]}}` (the Interactions API uses another format). We read `message` and `status` into `GeminiApiError`. | https://aistudio.google.com/docs/api-errors?generate-content=true | UNVERIFIED |
+| 18 | Status codes: 400 INVALID_ARGUMENT / FAILED_PRECONDITION, 402 RESOURCE_EXHAUSTED (prepay credits), 403 PERMISSION_DENIED, 404 NOT_FOUND, 429 RESOURCE_EXHAUSTED (rate limit), 499 CANCELLED, 500 INTERNAL, 503 UNAVAILABLE, 504 DEADLINE_EXCEEDED. Retry 408, 429 and 5xx; do not retry 400, 402, 403. 402 and 429 share the status string, so `classifyError` branches on the HTTP code. A daily-quota 429 does not clear until the reset, so BullMQ's three attempts end in `model_unavailable`. | https://aistudio.google.com/docs/api-errors?generate-content=true, https://aistudio.google.com/docs/troubleshooting?generate-content=true | UNVERIFIED |
+| 19 | Over-long input: no official wording. Forum reports show 400 INVALID_ARGUMENT "The input token count (N) exceeds the maximum number of tokens allowed (M)" and "the input token count is N but model only supports up to M" (some caps reported below the documented 1M context). Matched by `GEMINI_INPUT_TOO_LONG` → `context_too_large`; a miss gives `model_config_error` (also permanent). | https://discuss.ai.google.dev/t/gemini-3-5-flash-the-input-token-count-n-exceeds-the-maximum-number-of-tokens-allowed-32768/170484 (forum) | UNVERIFIED (forum only) |
+| 20 | Regions without the free tier: forum reports of 400 FAILED_PRECONDITION "Gemini API free tier is not available in your country. Please enable billing…", and of 403 variants. Both are `model_config_error` (permanent). | https://discuss.ai.google.dev/t/400-gemini-api-free-tier-is-not-available-in-your-country/36385 (forum), https://aistudio.google.com/docs/available-regions | UNVERIFIED (forum only) |
+| 21 | Default model `gemini-3.8-flash`: stable (updated September 2026), 1,048,576 input / 65,536 output tokens, structured output and thinking levels, marked "Free of charge" on the Free Tier. `gemini-2.5-flash` / `-pro` are deprecated and auto-route to 3.x models from 2026-12-01, so they are not the default. Alternatives: `gemini-3.5-flash-lite` (stable, free, near-off thinking by default; likely a separate quota) and `gemini-4-hydrogen` (stable, free per the pricing page, default thinking `high`, reportedly added to the free tier only on 2026-11-12). Set either with `GEMINI_MODEL`. | https://aistudio.google.com/docs/models, https://aistudio.google.com/docs/models/gemini-3.8-flash, https://aistudio.google.com/docs/pricing; https://apidog.com/blog/gemini-4-hydrogen-free/ (third party) | UNVERIFIED |
+| 22 | Free-tier rate limits are not published per model; they are shown in AI Studio (https://aistudio.google.com/rate-limit), apply per project (not per key) and RPD resets at midnight Pacific time. The smoke run makes 3 requests; `pnpm exec tsx scripts/eval.ts` makes 7. | https://aistudio.google.com/docs/rate-limits | UNVERIFIED |
+| 23 | Free-tier data use: Google may use prompts and responses of unpaid use to improve its products, and human reviewers may read them; the terms say not to submit sensitive, confidential or personal information. In the EEA, Switzerland and the UK, the paid-services terms apply, and serving users there requires Paid Services. Only send documents you are allowed to share this way (the sample is fictional). | https://aistudio.google.com/docs/terms | UNVERIFIED |
+| 24 | Google now calls `generateContent` legacy but "fully supported" (no sunset date) and recommends the Interactions API for new projects. A move to Interactions would change only `toGeminiRequest`, `geminiToRawAnswer` and the URL. | https://aistudio.google.com/docs/interactions | UNVERIFIED |
+
+Design premise (not a researched fact): Gemini has no Citations-style API that returns block indices into documents
+we supply. Its File Search tool grounds on Google's own chunking of an uploaded file, so its references would not be
+offsets into our stored sentence spans (alternatives are in DESIGN.md).
+
+## What the adapter does with these facts
+
+- Request: system instruction (`GEMINI_SYSTEM_INSTRUCTION`), history as `user`/`model` text turns, then one user turn
+  with the passages as numbered text (`<passage index="P" title="…">`, one `[S] sentence` per line, both 0-based)
+  followed by the same question text as the Claude request. Sentence-internal whitespace is sent as single spaces.
+- Response → `RawAnswer`: one block per answer segment; each citation `{passage, firstSentence, lastSentence, quote}`
+  becomes `{type: 'content_block_location', document_index: passage, start_block_index: firstSentence,
+  end_block_index: lastSentence + 1, cited_text: quote}`, untouched. `resolveCitations` then range-checks the indices,
+  requires the quote to equal the cited sentences (whitespace ignored) and slices the displayed quote from the
+  content. `notInDocument: true` becomes a leading `NOT_IN_DOCUMENT:` block.
+- A space is added between two segments when neither has whitespace at the join (display text only).
+
+## How to verify
+
+1. Get a free key: sign in to Google AI Studio (https://aistudio.google.com), "Get API key", create a key in a new
+   project. Check the project's limits at https://aistudio.google.com/rate-limit.
+2. In the repo-root dotenv file set `MODEL_PROVIDER=gemini` and `GEMINI_API_KEY=<key>` (optional:
+   `GEMINI_MODEL=gemini-3.8-flash`). Shell variables override the file.
+3. `pnpm smoke`: three sequential requests on the sample document, no retries. For each question it prints the outcome
+   (`answerable` / `not_in_document` / `unverified` / `truncated`), the verified citations with offsets, the drop
+   reasons, `stopReason`, `model` and `usage`. Exit 0 = all three expectations met, 1 = an expectation failed,
+   2 = configuration, HTTP or network error (the classified code and the API's message are printed).
+4. Read the result against the table:
+   - exit 2 with `model_config_error` and a message about an unknown field → fact 5 (try `responseFormat`) or fact 10
+     (`thinkingLevel` spelling); about the model → fact 21; `FAILED_PRECONDITION` → fact 20; 403 → key or project;
+   - `unverified` with `cited_text_mismatch` drops → the model's sentence numbers or quotes are off (prompt wording);
+     with `block_out_of_range` on every citation → a 1-based or exclusive reading of the numbers;
+   - `truncated` → raise `MAX_ANSWER_TOKENS` or the headroom constants (fact 11; compare `thoughtsTokenCount`);
+   - `model_refused` with `recitation` → fact 15.
+   Then mark each fact here confirmed (with the date and model version from the output) or fix the adapter and its
+   tests.
+5. Full stack: `docker compose up --build` (compose passes the dotenv variables to the containers), then
+   `pnpm exec tsx scripts/eval.ts` (7 questions over HTTP) and record its table in the README. Afterwards stop the app
+   containers (`docker compose rm -sf api worker migrate`) and run `docker image prune -f`.

@@ -204,13 +204,13 @@ Errors: `404 not_found`.
 | Field | Meaning |
 |---|---|
 | `status` | See lifecycle below. |
-| `content` | `pending`: `""`. `streaming`: partial raw model text, grows over time. `completed`: final text. `failed`: `""`. |
+| `content` | `pending`: `""`. `streaming`: partial raw model text, grows over time (with `MODEL_PROVIDER=gemini` it stays `""` until `completed`: the JSON answer arrives whole). `completed`: final text. `failed`: `""`. |
 | `answerable` | `null` until `completed`. `true`: grounded answer with ≥ 1 verified citation (even if the reply also starts with the `NOT_IN_DOCUMENT:` marker, e.g. a partial answer; `content` is then the model text as written). `false`: no citation was verified and the model said the document does not answer the question (`NOT_IN_DOCUMENT:` marker, Markdown formatting and case tolerated); `content` is a fixed not-found message and `citations` is `[]`. A reply with no verified citation and no such statement is never `false`: it fails with `citations_unverified` (or `answer_truncated`). With `retrieval.mode: "full"` the whole document was sent; with `ranked`/`fallback` only part of it was, and the message says so. |
 | `citations[]` | Verified quotations, in answer order. `quote` is `content.slice(startOffset, endOffset)` of the **document** (never model-written text); `heading` is the nearest Markdown heading (or `null`); `passageId` is internal. `[answerStart, answerEnd)` is the span of the **answer** `content` that this quote supports, for linking a claim to its source. A quote that spans several sentences is one contiguous slice, so it includes any Markdown syntax between them (list or quote markers, table pipes) that was masked out of what the model saw. |
-| `finishReason` | Model stop reason, e.g. `end_turn`; `max_tokens` means the answer was cut at the length limit after at least one verified citation (a cut answer with none fails with `answer_truncated`). |
+| `finishReason` | Model stop reason, e.g. `end_turn` (Gemini's `STOP` is reported as `end_turn` and `MAX_TOKENS` as `max_tokens`); `max_tokens` means the answer was cut at the length limit after at least one verified citation (a cut answer with none fails with `answer_truncated`). |
 | `error` | `{code, message}` when `failed`, else `null`. |
 | `attempts` | Processing runs started: normally ≤ 3 (one per BullMQ attempt), but a worker crash (stalled-job rerun) or a reconciler re-enqueue adds runs. |
-| `model`, `usage` | Model id and the provider's token usage, as reported. |
+| `model`, `usage` | Model id and the provider's token usage, as reported (Claude: `{input_tokens, output_tokens, …}`; Gemini: its `usageMetadata`, `{promptTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount, …}`, and `modelVersion`). |
 | `retrieval` | What was sent to the model. `mode`: `full` (the whole document fits `FULL_CONTEXT_TOKENS`, no search), `ranked` (larger document: full-text search hits plus their neighbour passages), `fallback` (larger document but nothing to search for or no hits, e.g. a stopword-only question: the leading passages). `passageIds` / `passageOrdinals`: the passages sent, in document order (ordinal = position in the document, from 0). `hits`: search results best first, `{passageId, ordinal, rank (1-based), score}`; `[]` unless `ranked`; a hit missing from `passageIds` was cut by the token budget. `tokenEstimate` (sent) and `documentTokens` (whole document) use the `chars / 4` estimate. `debug` (including `debug.query`, the searched text and tsquery, `null` in `full` mode) is for diagnosis, not a stable contract. `null` until `completed`. |
 
 ## Status lifecycles
@@ -245,7 +245,8 @@ history sent to the model.
 - Documents: poll `GET /documents/:id` every 1 s. The sample document is ready within a second; preparation takes
   about 160 ms of CPU for a 5 MB file, plus queue latency.
 - Answers: poll `GET /messages/:id` every 500 ms–1 s until `completed` or `failed`. The worker writes partial `content`
-  at most every 400 ms, so polling faster gains nothing.
+  at most every 400 ms, so polling faster gains nothing. With `MODEL_PROVIDER=gemini` there are no partial writes: the
+  answer stays `streaming` with empty `content` until it completes.
 - Treat `streaming` text as provisional: it is unverified model text, citations appear only with `completed`, and an
   answer that turns out not answerable replaces it with the not-found message. If a retry happens, `status` goes back
   to `pending` and `content` to `""`; render whatever the latest poll returns.
