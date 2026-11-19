@@ -251,8 +251,8 @@ What remains, in priority order:
 6. **PDF** via a converter in the prepare step, under the same offset contract.
 7. **Authentication and per-document access** as sketched under [Access control](#access-control).
 
-Submission items still open (human): the **recording link** in the README (currently "pending"), and committing
-`.env.example` (agents cannot touch dotenv files; the README carries an equivalent inline block meanwhile).
+Submission item still open (human): the **recording link** in the README (currently "pending"). The example
+configuration file was committed by the human (agents cannot touch dotenv files).
 
 Smaller follow-ups: prompt caching of the document prefix across follow-ups; the server-side refusal fallback beta;
 flag or drop uncited sentences in answerable replies; a real tokenizer for budgets (CJK); `DELETE /documents/:id`;
