@@ -142,18 +142,40 @@ pnpm typecheck
 ```
 
 Integration tests use the `curie_test` database (created on first Postgres volume init) and fail fast with a hint if
-Postgres or Redis is down. All tests use the fake model. Current result: 207 tests in 14 files pass (128 unit,
-79 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
+Postgres or Redis is down. All tests use the fake model. Current result: 222 tests in 16 files pass (140 unit,
+82 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
 
 `pnpm spike` (`scripts/spike-citations.ts`) dumps raw Citations responses for the sample document and needs an
-Anthropic key. `pnpm eval` is planned (Task 12); `scripts/eval.ts` does not exist yet.
+Anthropic key.
+
+## Eval
+
+```sh
+docker compose up --build -d   # with MODEL_PROVIDER=anthropic and ANTHROPIC_API_KEY in .env
+pnpm eval                      # EVAL_BASE_URL (default http://localhost:3000); EVAL_VERBOSE=1 prints each answer
+```
+
+`scripts/eval.ts` drives the running API over HTTP: it uploads `samples/harbor-archive.md`, waits for `ready`, asks
+the questions in [`samples/eval-questions.json`](samples/eval-questions.json) (a follow-up chain "How many questions
+did the hybrid prototype get right?" → "And keyword search?" in one conversation; the pilot owner, next review date
+and hybrid latency; two unanswerable questions, funding and production-scale latency), and checks each answer: the
+expected `answerable` value, an expected substring in at least one citation quote, and every citation's offsets
+slicing the stored content to its quote. It prints a table and exits 1 if any answer fails (2 if the harness itself
+fails: API down, document failed, timeout). The assertions (`scripts/eval-check.ts`) are unit-tested, and the
+harness runs in `pnpm test` against a listening app with the fake model (`test/integration/eval-harness.test.ts`).
+
+**Results: not yet run (keyless).** No API key was available for this build, so the eval has never run against real
+Claude. It was run once against the compose stack with `MODEL_PROVIDER=fake` to check the harness only: it ran end
+to end and reported 0/7, as expected, because the fake model cites the document's first sentence for every question
+(exit code 1; an unreachable `EVAL_BASE_URL` gives exit code 2). The sample document is sent whole (`full` mode), so
+the eval does not cover `ranked` retrieval.
 
 ## Verification status
 
 This build had **no Anthropic API key** (a deliberate decision to continue keyless). So:
 
 Verified:
-- `pnpm typecheck` and `pnpm test`: 207/207 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
+- `pnpm typecheck` and `pnpm test`: 222/222 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
   workers in the integration tests.
 - The example flow above, over HTTP against the compose stack with `MODEL_PROVIDER=fake`: upload → ready → ask →
   poll → follow-up → offsets slice the stored content; plus 400/404/409/415 responses and a failed document
@@ -167,8 +189,8 @@ Not verified:
   ([docs/notes/citations-spike.md](docs/notes/citations-spike.md) marks each fact UNVERIFIED). If an assumption is
   wrong, citation verification drops the quotes (the answer then becomes "not found"); it cannot show a quote that
   is not in the document.
-- `pnpm spike` and `pnpm eval` have not been run; answer quality, `NOT_IN_DOCUMENT:` adherence and real latency are
-  unknown. Real API error bodies (over-long prompt, 529, refusal) were not observed.
+- `pnpm spike` has not been run, and `pnpm eval` has not been run against real Claude (only against the fake model,
+  to check the harness); answer quality, `NOT_IN_DOCUMENT:` adherence and real latency are unknown. Real API error bodies (over-long prompt, 529, refusal) were not observed.
 - Ranked retrieval for documents larger than `FULL_CONTEXT_TOKENS` is tested against real Postgres full-text
   search on a synthetic document, with `FakeModel` only; it has not been tried with the real model or a real long
   paper (the sample document is small enough to be sent whole).
@@ -176,5 +198,5 @@ Not verified:
   concurrent workers/pollers.
 
 To verify with a key: set `MODEL_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in `.env`, run `pnpm spike` and compare
-`docs/notes/spike-output/` with the facts in `docs/notes/citations-spike.md`, then rerun the example flow and ask
-"Who funded the study?" to see a not-found answer.
+`docs/notes/spike-output/` with the facts in `docs/notes/citations-spike.md`, then run `pnpm eval` against
+`docker compose up --build` and record its table under [Eval](#eval).

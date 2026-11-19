@@ -4,8 +4,8 @@ Design, decisions and status of the chat-with-a-document backend. Running it: [R
 shapes, statuses and error codes: [docs/API.md](docs/API.md). Assumed Claude Citations shapes:
 [docs/notes/citations-spike.md](docs/notes/citations-spike.md).
 
-> Status: draft (plan Task 10, retrieval updated in Task 11). The live eval (Task 12) is not done yet; this build
-> never called the real Claude API (no key). See [Complete vs remaining](#complete-vs-remaining) and
+> Status: draft (plan Task 10, retrieval updated in Task 11, eval harness in Task 12). The live eval has not been run;
+> this build never called the real Claude API (no key). See [Complete vs remaining](#complete-vs-remaining) and
 > [Verification](#verification).
 
 ## Assumptions
@@ -160,13 +160,14 @@ Time log. "Agent-reported" is what each task agent wrote next to its plan header
 | 8 Conversations, thin path, Docker | 30 | ~25 | 17:40 (9) |
 | 9 Failure handling + reconciler | 20 | ~20 | 17:46 (6) |
 | 10 Docs draft | 35 | ~20 | 17:55 (9) |
-| 11 Ranked retrieval | 20 | ~20 | this commit |
+| 11 Ranked retrieval | 20 | ~20 | 18:02 (7) |
+| 12 Eval harness (live run not possible, keyless) | 10 | ~15 | this commit |
 | Tasks 1–9 total | 185 min | ~200 min | 96 min (16:10–17:46) |
 
 Time before the plan commit (brainstorm, plan review) and the human's own review time are not in this table.
 
 ## Complete vs remaining
-Complete (Tasks 1–9 and 11, tested with the fake model):
+Complete (Tasks 1–9, 11 and the Task 12 harness, tested with the fake model):
 - Add Markdown or plain-text documents; asynchronous preparation with `ready`, or `failed` plus a reason code.
 - Multi-turn conversations about one document; one answer in flight per conversation, enforced by the database.
 - Answers grounded through Citations over sentence blocks; every quote re-verified against the stored content and located by UTF-16 offsets; explicit not-found (`answerable: false`).
@@ -174,9 +175,10 @@ Complete (Tasks 1–9 and 11, tested with the fake model):
 - Retrieval: whole document when it fits the budget, otherwise ranked full-text search (current + previous question, OR tsquery, top 8 + neighbours), leading passages when there is nothing to search for.
 - Failure classification, retries, processor-owned terminal state, reconciler for lost and stalled jobs.
 - Docker Compose for the whole stack; README, this file, the API spec.
+- `pnpm eval` (`scripts/eval.ts`): drives the HTTP API with `samples/eval-questions.json` and asserts the expected not-found outcome or an expected substring in a verified citation quote. Never run against real Claude.
 
 Remaining in the plan:
-- Task 12: live eval against Claude; needs an API key. `scripts/eval.ts` is not written yet.
+- Task 12: the live eval run itself; needs an API key (the harness is written and tested).
 - Task 13: acceptance check and a fresh-clone run of the README. Task 14: final docs.
 - Task 15 (stretch): SSE over Redis Streams.
 
@@ -188,20 +190,21 @@ Next steps beyond the plan:
 - A real tokenizer for budgets (CJK); PDF via a converter; `DELETE /documents/:id`; pagination of `GET /documents`.
 
 ## Verification
-Automated (`pnpm test`: 207 tests, 14 files, all passing; `pnpm typecheck` clean):
+Automated (`pnpm test`: 222 tests, 16 files, all passing; `pnpm typecheck` clean):
 
 | Level | Files | Tests | What and why |
 |---|---|---|---|
 | Unit, pure domain | `chunking`, `citations`, `retrieval` | 19 + 22 + 18 | Where correctness is decided: span invariants on every fixture (CRLF, emoji/CJK surrogates, 5,000-char sentence, syntax-only input), citation mapping including forged `cited_text`, out-of-range and inclusive-`end` misreadings, UTF-16 offsets; retrieval query text, mode by token total, neighbours, dedupe, budget cap, document order. Written test-first. |
 | Unit, model boundary | `prompt`, `llm-errors`, `anthropic-model`, `fake-model` | 50 | Exact expected request body for a small document (stands in for the missing live call); real SDK error instances; the real SDK client driven through a stubbed `fetch` with SSE events written from the assumed shapes. |
 | Unit, config | `config`, `loadEnv` | 14 + 5 | Defaults, invalid values, key required unless fake; dotenv loading never overrides the shell. |
-| Integration | `db`, `documents`, `conversations`, `failures`, `retrieval` | 13 + 22 + 15 + 16 + 13 | Real Postgres, Redis and BullMQ workers in-process, `fastify.inject`, `FakeModel`. The risks here are constraints (`one_inflight_answer`, guarded transitions), BullMQ semantics (`attemptsMade` pinned on 6.7.7), timing (a latched model shows partial content and the 409), retries and the reconciler; mocks would hide exactly these. `retrieval` runs the real Postgres text search on a synthetic over-budget document (filler + needle sections): needle + neighbours, double-stemming trap, hyphenated terms, stopword-only → `fallback`, sample → `full`, and what the processor records and sends. |
+| Unit, eval rule | `eval-check` | 12 | The live eval's pass/fail rule (`scripts/eval-check.ts`): the substring must be in a citation quote, not only in the answer text; not-found with citations fails; alternative outcomes; offsets that do not slice to the quote fail; failed answers; question-file schema. A wrong rule would make a real run meaningless. |
+| Integration | `db`, `documents`, `conversations`, `failures`, `retrieval`, `eval-harness` | 13 + 22 + 15 + 16 + 13 + 3 | Real Postgres, Redis and BullMQ workers in-process, `fastify.inject`, `FakeModel`. The risks here are constraints (`one_inflight_answer`, guarded transitions), BullMQ semantics (`attemptsMade` pinned on 6.7.7), timing (a latched model shows partial content and the 409), retries and the reconciler; mocks would hide exactly these. `retrieval` runs the real Postgres text search on a synthetic over-budget document (filler + needle sections): needle + neighbours, double-stemming trap, hyphenated terms, stopword-only → `fallback`, sample → `full`, and what the processor records and sends. `eval-harness` runs the eval runner over real HTTP against a listening app: a correctly scripted fake passes all 7 rows with the follow-up in the same conversation, the demo fake fails all 7 as rows, and a failed document or unreachable API is a harness error. It checks the harness, not answer quality. |
 
 `FakeModel` replaces the network: scripted replies by question, per-attempt errors, a latch to hold an answer mid-stream, and every request recorded so tests can assert what history was sent. Its citations go through the same verification as real ones.
 
-Manual checks ([docs/notes/manual-checks.md](docs/notes/manual-checks.md)): the compose stack with `MODEL_PROVIDER=fake`, the curl flow from upload to follow-up, offsets sliced against `GET /documents/:id/content`, error responses, clean shutdown. In Task 10 the README example flow was run again against a freshly built stack, plus a failed document (`empty_after_parse`) and the 409 for asking about it.
+Manual checks ([docs/notes/manual-checks.md](docs/notes/manual-checks.md)): the compose stack with `MODEL_PROVIDER=fake`, the curl flow from upload to follow-up, offsets sliced against `GET /documents/:id/content`, error responses, clean shutdown. In Task 10 the README example flow was run again against a freshly built stack, plus a failed document (`empty_after_parse`) and the 409 for asking about it. In Task 12 the eval CLI was run once against the compose stack with `MODEL_PROVIDER=fake`: it ran end to end and reported 0/7 with exit code 1, as expected for the demo model (a harness check only), and exit code 2 for an unreachable API.
 
-Not verified: no real Claude call (shapes assumed, spike and eval not run), real error bodies, `ranked` mode against the real model (tested only with `FakeModel` on a synthetic document), a real full-length paper, a dotenv value overriding the compose default, load and concurrency, a worker crash mid-job (BullMQ stalled-job path). Details in [README § Verification status](README.md#verification-status).
+Not verified: no real Claude call (shapes assumed, spike not run, eval run only against the fake model), real error bodies, `ranked` mode against the real model (tested only with `FakeModel` on a synthetic document), a real full-length paper, a dotenv value overriding the compose default, load and concurrency, a worker crash mid-job (BullMQ stalled-job path). Details in [README § Verification status](README.md#verification-status).
 
 ## AI use
 - Tools: Claude Code. The design came from a Claude Code brainstorm session in which the human made each choice: Anthropic as the only provider (hence lexical retrieval); a persisted job with SSE and polling, later reduced to progressive polling with SSE as a stretch goal after the plan review; Claude Citations over sentence blocks, over model-written quotes with fuzzy matching and over sending the whole document every time.

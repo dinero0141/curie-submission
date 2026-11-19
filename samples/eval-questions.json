@@ -1,0 +1,57 @@
+{
+  "document": { "path": "samples/harbor-archive.md", "title": "Harbor Archive retrieval pilot", "format": "markdown" },
+  "conversations": [
+    [
+      {
+        "id": "hybrid-correct",
+        "question": "How many questions did the hybrid prototype get right?",
+        "expect": [{ "answerable": true, "quoteIncludes": "34 of the 40" }]
+      },
+      {
+        "id": "keyword-followup",
+        "question": "And keyword search?",
+        "expect": [{ "answerable": true, "quoteIncludes": "28 of the 40" }],
+        "note": "Follow-up: only answerable through the conversation history."
+      }
+    ],
+    [
+      {
+        "id": "pilot-owner",
+        "question": "Who owned the limited pilot?",
+        "expect": [{ "answerable": true, "quoteIncludes": "Mira Chen" }]
+      }
+    ],
+    [
+      {
+        "id": "next-review",
+        "question": "When is the next review planned?",
+        "expect": [{ "answerable": true, "quoteIncludes": "8 April 2026" }]
+      }
+    ],
+    [
+      {
+        "id": "hybrid-latency",
+        "question": "What was the hybrid prototype's median response time?",
+        "expect": [{ "answerable": true, "quoteIncludes": "1.2 seconds" }]
+      }
+    ],
+    [
+      {
+        "id": "funding",
+        "question": "Who funded the study?",
+        "expect": [{ "answerable": false }]
+      }
+    ],
+    [
+      {
+        "id": "production-latency",
+        "question": "What was production-scale latency?",
+        "expect": [
+          { "answerable": false },
+          { "answerable": true, "quoteIncludes": "No conclusion about production-scale performance was drawn" }
+        ],
+        "note": "Not reported. An answer that says so and cites the sentence about production-scale performance also passes."
+      }
+    ]
+  ]
+}
