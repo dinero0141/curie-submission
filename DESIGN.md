@@ -150,7 +150,7 @@ shapes, statuses and error codes: [docs/API.md](docs/API.md). Assumed Claude Cit
 - **CommonMark parser for chunking**: we would still need the masking and trimming for exact sentence spans on top (see [Document preparation](#document-preparation-chunking)).
 
 ## Implementation plan and time log
-The plan ([docs/plans/20261119-curie-doc-chat-backend.md](docs/plans/20261119-curie-doc-chat-backend.md)) splits the work into small tasks, each ending in a commit with passing tests. Order and why:
+The plan ([docs/plans/completed/20261119-curie-doc-chat-backend.md](docs/plans/completed/20261119-curie-doc-chat-backend.md)) splits the work into small tasks, each ending in a commit with passing tests. Order and why:
 
 1. Scaffold, schema, chunking first: offsets and sentence spans are the contract everything else depends on, so they were built and tested before any model code.
 2. Citations spike before citation code: the Citations shapes decide the mapping. Without a key, the spike became a documented set of assumptions, and the mapping was written defensively against them.
