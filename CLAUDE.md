@@ -17,6 +17,11 @@ Rules given to the coding agents that implement this repo. The plan lives in `do
 - The job processor owns terminal DB state (writes `failed` itself on permanent errors or the final attempt); `worker.on('failed')` is only a logging backstop.
 - Error responses use the envelope `{ "error": { "code", "message" } }`.
 
+## Database
+- Schema changes go in `migrations/*.sql` and must stay idempotent (`IF NOT EXISTS`); `pnpm migrate` re-runs every file.
+- Repositories in `src/db/` are plain functions taking a `Queryable`; use `withTx(pool, fn)` for multi-statement writes. Map unique violations with `isUniqueViolation(err, constraintName)`.
+- Integration tests call `useIntegrationEnv()` from `test/integration/setup.ts` (pool on `curie_test`, TRUNCATE per file, unique BullMQ prefix). `globalSetup.ts` fails fast if Postgres/Redis are down and migrates once.
+
 ## Workflow
 - One plan task per agent run; complete all its checkboxes, then stop.
 - Every task adds or updates tests (success and error cases). Pure domain logic is written test-first.
