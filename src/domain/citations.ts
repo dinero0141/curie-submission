@@ -33,10 +33,11 @@ const MARKER_AT_START = /^[\s*_`>#]*NOT_IN_DOCUMENT(?![A-Za-z0-9])/i;
 const MARKER_ANYWHERE = /(?<![A-Za-z0-9])NOT_IN_DOCUMENT(?![A-Za-z0-9])/i;
 
 /**
- * Whether the reply says the document does not answer the question. When the model emitted any citation, verified
- * or dropped, only a marker at the start counts: a cited answer may mention the word, and a partial answer ("X
- * [cited]. NOT_IN_DOCUMENT: Y is not stated.") whose citations were all dropped by verification is evidence of a
- * shape mismatch, not of a missing answer (it stays `unverified`). With no citation at all, the marker anywhere counts.
+ * Whether the reply says the document does not answer the question. When the model emitted any citation, only a
+ * marker at the start counts: a partial answer ("X [cited]. NOT_IN_DOCUMENT: Y is not stated.") whose citations
+ * were all dropped by verification is evidence of a shape mismatch, not of a missing answer (it stays
+ * `unverified`). With no citation at all, the marker anywhere counts. `resolveCitations` only consults this when
+ * no citation was verified: a reply with a verified citation is answerable whatever the marker says.
  */
 export function hasNotInDocumentMarker(text: string, modelCited: boolean): boolean {
   return MARKER_AT_START.test(text) || (!modelCited && MARKER_ANYWHERE.test(text));
@@ -177,8 +178,10 @@ export type ResolveOptions = {
 };
 
 /**
- * Why an answer is not answerable, or `null` when it is. Only the marker means "not in the document"; with no
- * verified citation, a `max_tokens` stop is `truncated` and anything else is `unverified`.
+ * Why an answer is not answerable, or `null` when it is. A verified citation makes the reply answerable, even
+ * when it starts with the marker (a partial answer that leads with what the document does not cover keeps its
+ * verified quotes). With no verified citation, only the marker means "not in the document"; otherwise a
+ * `max_tokens` stop is `truncated` and anything else is `unverified`.
  */
 function notFoundReasonOf(
   rawText: string,
@@ -186,17 +189,17 @@ function notFoundReasonOf(
   dropped: DroppedCitation[],
   stopReason: string,
 ): ResolvedAnswer['notFoundReason'] {
-  if (hasNotInDocumentMarker(rawText, citations.length > 0 || dropped.length > 0)) return 'not_in_document';
   if (citations.length > 0) return null;
+  if (hasNotInDocumentMarker(rawText, dropped.length > 0)) return 'not_in_document';
   if (stopReason === 'max_tokens') return 'truncated';
   return 'unverified';
 }
 
 /**
  * Map the model's citations to verified source quotations and decide whether the answer is grounded.
- * Not answerable when the reply carries the `NOT_IN_DOCUMENT` marker (see `hasNotInDocumentMarker`) or when no
- * citation survives verification. Only the marker is reported as "not in the document"; otherwise a
- * `max_tokens` stop is `truncated` and anything else is `unverified`.
+ * Answerable when at least one citation survives verification (the model text is kept as is, marker included).
+ * Otherwise the `NOT_IN_DOCUMENT` marker (see `hasNotInDocumentMarker`) is reported as "not in the document",
+ * a `max_tokens` stop is `truncated` and anything else is `unverified`.
  */
 export function resolveCitations(
   raw: RawAnswer,

@@ -233,11 +233,11 @@ describe('resolveCitations — not answerable', () => {
   const { content, docs } = setup(SAMPLE);
   const results = docIndexByHeading(docs, 'Results');
 
-  it('treats a NOT_IN_DOCUMENT: reply as not answerable, strips citations, keeps raw text', () => {
+  it('treats a NOT_IN_DOCUMENT: reply with no verified citation as not answerable, keeps raw text', () => {
     const raw = `${NOT_IN_DOCUMENT_MARKER} the note does not give the team size.`;
     for (const lead of ['', '  \n']) {
       const r = resolveCitations(
-        answer({ text: lead + raw.slice(0, 20) }, { text: raw.slice(20), citations: [cite(docs, results, 0, 1)] }),
+        answer({ text: lead + raw.slice(0, 20) }, { text: raw.slice(20), citations: [cite(docs, results, 0, 1, 'invented')] }),
         docs,
         content,
       );
@@ -276,9 +276,20 @@ describe('resolveCitations — not answerable', () => {
     expect(resolveCitations(cited, docs, content, { partial: true })).toMatchObject({ answerable: true, text: 'Mira Chen.' });
   });
 
-  it('treats a formatted marker at the start as not-found even with a verified citation', () => {
-    const r = resolveCitations(answer({ text: '**NOT_IN_DOCUMENT:** no.', citations: [cite(docs, results, 0, 1)] }), docs, content);
-    expect(r).toMatchObject({ answerable: false, citations: [], notFoundReason: 'not_in_document' });
+  it('keeps a marker-first reply with a verified citation answerable, with its quotes', () => {
+    const text = '**NOT_IN_DOCUMENT:** the funding is not stated. The pilot was owned by Mira Chen.';
+    const r = resolveCitations(answer({ text, citations: [cite(docs, results, 0, 1)] }), docs, content);
+    expect(r).toMatchObject({ answerable: true, text, notFoundReason: null });
+    expect(r.citations).toHaveLength(1);
+  });
+
+  it('treats a marker-first reply whose citations were all dropped as not-found', () => {
+    const r = resolveCitations(
+      answer({ text: '**NOT_IN_DOCUMENT:** no.', citations: [cite(docs, results, 0, 1, 'invented')] }),
+      docs,
+      content,
+    );
+    expect(r).toMatchObject({ answerable: false, text: NOT_FOUND_MESSAGE, citations: [], notFoundReason: 'not_in_document' });
   });
 
   it('does not take a longer word containing the marker as the marker', () => {
@@ -350,7 +361,7 @@ describe('resolveCitations — not answerable', () => {
       content,
     );
     expect(r.answerable).toBe(true);
-    // Also after a preamble: with a verified citation only a marker at the start counts.
+    // Also after a preamble: with a verified citation the marker never makes the reply not-found.
     const preamble = resolveCitations(
       answer({ text: `I checked. ${NOT_IN_DOCUMENT_MARKER} no.`, citations: [cite(docs, results, 0, 1)] }),
       docs,

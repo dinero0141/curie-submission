@@ -15,8 +15,8 @@ import { fileURLToPath } from 'node:url';
 import Anthropic from '@anthropic-ai/sdk';
 import { ConfigError, loadConfig } from '../src/config.js';
 import { chunkDocument, type Passage } from '../src/domain/chunking.js';
-import { hasNotInDocumentMarker, NOT_IN_DOCUMENT_MARKER } from '../src/domain/citations.js';
-import { toAnthropicParams } from '../src/llm/anthropic.js';
+import { NOT_IN_DOCUMENT_MARKER, resolveCitations } from '../src/domain/citations.js';
+import { toAnthropicParams, toRawAnswer } from '../src/llm/anthropic.js';
 import { buildRequest, type PromptPassage } from '../src/llm/prompt.js';
 import type { AnswerRequest, RequestDocument } from '../src/llm/types.js';
 import { loadEnvFile } from '../src/loadEnv.js';
@@ -142,12 +142,20 @@ async function main(): Promise<void> {
         r.thinking,
       );
       const checks: Check[] = [];
+      // Every citation is counted by `type`: a shape mismatch shows up as other types (or none), not as a failed check.
+      const citationTypes: Record<string, number> = {};
       for (const block of message.content) {
         if (block.type !== 'text') continue;
         for (const c of block.citations ?? []) {
+          citationTypes[c.type] = (citationTypes[c.type] ?? 0) + 1;
           if (c.type === 'content_block_location') checks.push(checkCitation(c, docs, content));
         }
       }
+      const otherCitations = Object.entries(citationTypes)
+        .filter(([type]) => type !== 'content_block_location')
+        .reduce((n, [, count]) => n + count, 0);
+      // What production would make of this reply (the same verification and not-found rule).
+      const resolved = resolveCitations(toRawAnswer(message), docs, content);
       const text = message.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
       const { id: _id, ...rest } = message; // drop the message id; nothing else in the body is sensitive
       writeFileSync(
@@ -161,7 +169,9 @@ async function main(): Promise<void> {
             eventTypes,
             firstTextMs,
             totalMs,
+            citationTypes,
             checks,
+            resolved: { notFoundReason: resolved.notFoundReason, verified: resolved.citations.length, dropped: resolved.dropped },
             finalMessage: rest,
           },
           null,
@@ -175,11 +185,19 @@ async function main(): Promise<void> {
         maxTokens: sentParams.max_tokens,
         blocks: message.content.map((b) => b.type).join(','),
         citations: checks.length,
-        allInRange: checks.every((c) => c.inRange),
-        allConcat: checks.every((c) => c.citedTextEqualsConcat),
+        citationTypes,
+        // `null` = inconclusive: no `content_block_location` citation to check (never a vacuous `true`).
+        allInRange: checks.length > 0 ? checks.every((c) => c.inRange) : null,
+        allConcat: checks.length > 0 ? checks.every((c) => c.citedTextEqualsConcat) : null,
         multiBlock: checks.filter((c) => c.endBlock - c.startBlock > 1).length,
-        // Marker adherence: `notInDocument` is what the service accepts, `markerExact` is the instructed format.
-        notInDocument: hasNotInDocumentMarker(text, false),
+        // Answerable runs: the assumed shapes hold only if there is ≥ 1 `content_block_location` citation, no
+        // other citation type, and production verifies at least one. `null` for unanswerable runs.
+        shapeOk: r.q === 'answerable' ? checks.length > 0 && otherCitations === 0 && resolved.citations.length > 0 : null,
+        verified: resolved.citations.length,
+        // Production outcome (`null` = answerable). Marker adherence: `notInDocument` is what the service
+        // accepts (production rule), `markerExact` is the instructed format.
+        notFoundReason: resolved.notFoundReason,
+        notInDocument: resolved.notFoundReason === 'not_in_document',
         markerExact: text.trimStart().startsWith(NOT_IN_DOCUMENT_MARKER),
         firstTextMs,
         totalMs,

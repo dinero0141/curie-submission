@@ -29,7 +29,7 @@ Paths below are relative to `node_modules/@anthropic-ai/sdk/`. Line numbers are 
 | 13 | Sonnet 5.5 thinking: omitting `thinking` runs adaptive thinking. `{type:'disabled'}` is a 400. `{type:'between_tools'}` turns thinking off, takes no other field, and works only at effort `high` or below (the default effort is `high`). Thinking tokens count toward `max_tokens`, and with the default `display: 'omitted'` a response can start with a `thinking` block with empty text, so read blocks by `type`, never by position. | skill § Thinking & Effort table; `shared/model-migration.md` § Migrating to Claude Sonnet 5.5 → Breaking change 1; `messages.d.ts:4278-4292` (`ThinkingConfigAdaptive`, `ThinkingConfigBetweenTools`, `ThinkingConfigDisabled`) | UNVERIFIED — not observed live |
 | 14 | Sonnet 5.5 may decline with `stop_reason: 'refusal'` (HTTP 200, `stop_details.category`). The skill recommends the server-side `fallbacks: "default"` beta (`server-side-fallback-2026-07-01`, `client.beta.messages`). Decided in Task 6: not enabled yet (plain `model_refused`); see DESIGN.md § Model integration. | skill § Claude Fable 5.2 → `refusal` stop reason; `shared/model-migration.md` § Sonnet 5.5 → Safeguards and fallback | UNVERIFIED — not observed live |
 | 15 | Limits on the number of documents per request or blocks per document: **not stated** in the skill or the SDK types. Unknown until the spike runs. | none found | UNKNOWN |
-| 16 | Whether the model actually follows the `NOT_IN_DOCUMENT:` instruction (for example, adds no text before it) is behaviour, not a shape. It cannot be known without live calls. `resolveCitations` therefore matches the marker tolerantly (Markdown emphasis/code/quote characters, any case, and anywhere in the reply when the model emitted no citation at all; with citations that were all dropped only a marker at the start counts); a reply with no verified citation and no marker fails as `citations_unverified`, never as not-found. `pnpm spike` reports `markerExact` (instructed format) next to `notInDocument` (accepted). | none (behaviour) | UNKNOWN |
+| 16 | Whether the model actually follows the `NOT_IN_DOCUMENT:` instruction (for example, adds no text before it) is behaviour, not a shape. It cannot be known without live calls. `resolveCitations` therefore matches the marker tolerantly (Markdown emphasis/code/quote characters, any case, and anywhere in the reply when the model emitted no citation at all; with citations that were all dropped only a marker at the start counts; a reply with a verified citation is answerable whatever the marker says); a reply with no verified citation and no marker fails as `citations_unverified`, never as not-found. `pnpm spike` reports `markerExact` (instructed format) next to `notInDocument` (accepted). | none (behaviour) | UNKNOWN |
 
 ## Chosen packaging: one custom-content document per passage
 
@@ -85,10 +85,15 @@ packagings, so this can be compared.
    `output_config.effort: 'medium'`. The `single` packaging and the `between_tools` thinking setting are
    extra variants on top of that body; each run file records what was sent under `request`.
 3. Look in `docs/notes/spike-output/`:
-   - `summary.json`: one row per run. Check `allInRange: true` and `allConcat: true` (`cited_text` ==
-     blocks joined with no separator; if `false`, look at `checks[].citedTextEqualsSpaceJoin` in the
-     run file), `multiBlock` (are there citations over several blocks?), `notInDocument: true` for the
-     `*-unanswerable` runs, and `stop: "end_turn"` (a `max_tokens` stop means thinking used up the
+   - `summary.json`: one row per run. On every `*-answerable` run, first check `shapeOk: true`: `citations > 0`
+     (`content_block_location` citations) and `citationTypes` holds no other type, and production verified at
+     least one (`verified > 0`, `notFoundReason: null`). Zero citations, or citations of another type (for
+     example `char_location`), is the shape mismatch these checks exist to catch: do not mark facts 3-6
+     observed. Then check `allInRange: true` and `allConcat: true` (`null` means there was nothing to check,
+     which is inconclusive, never a pass; `cited_text` == blocks joined with no separator; if `false`, look
+     at `checks[].citedTextEqualsSpaceJoin` in the run file), `multiBlock` (are there citations over several
+     blocks?), `notInDocument: true` for the `*-unanswerable` runs (computed with the production rule,
+     `resolveCitations`), and `stop: "end_turn"` (a `max_tokens` stop means thinking used up the
      headroom: the run is inconclusive, not a shape mismatch). A run without an `error` row also confirms
      that the API accepts `output_config.effort` and the `max_tokens` production sends. Compare `firstTextMs`/`totalMs` for the
      `between-tools` run against `per-passage-answerable`.
