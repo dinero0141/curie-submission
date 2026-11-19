@@ -101,3 +101,32 @@ POST /conversations/<unknown uuid>/messages     → {"error":{"code":"not_found"
 App containers removed afterwards (`docker compose rm -sf api worker migrate`), images and build cache pruned.
 Still not seen over HTTP: a not-found answer (the fake's default answer always cites), partial content while
 `streaming` and `409 answer_in_progress` (the fake answers too fast); all three are covered by integration tests.
+
+## 2026-11-19 — fresh-clone check of the README, `MODEL_PROVIDER=fake` (Task 13, keyless run)
+
+Setup: `git clone` of the worktree's committed state (`e913283`) into a scratch directory, with the worktree's own
+compose stack stopped first to free the ports. The clone has no dotenv file and no `.env.example` (that file was
+still uncommitted at this point; the user commits it), so the README's optional `cp` step was skipped. Then, in the
+clone:
+
+- `docker compose up -d --build --wait` → image built, `migrate` exited 0, `api` and `worker` healthy;
+  `docker compose config` showed `MODEL_PROVIDER: fake` for every app service (the default when nothing overrides it).
+- The README "Example flow" block, copied out of the clone's README and run unchanged with `bash -e` → exit 0.
+  Output matched the README: document `ready` with 5 passages; answer `completed`, `answerable: true`, one citation at
+  `[34, 110)` with `answerStart 45` / `answerEnd 121`; four messages in seq order (user, assistant, user, assistant);
+  the offset check printed `matches: true`.
+- Extra, same stack: the sample uploaded as `format: "text"` → `ready` with 2 passages (plain text keeps the Markdown
+  syntax as content, so the first sentence is the `# Harbor Archive retrieval pilot` line); a question about it →
+  `completed`, `retrieval.mode: "full"`, citation `[0, 32)` slicing to its quote. `{"content": "# only a heading"}` →
+  `failed`, `empty_after_parse`, "document has no text content after parsing".
+- By mistake the first extraction picked the README's "Local development" block instead, so `pnpm install`,
+  `pnpm migrate` and `pnpm dev:api` also ran in the clone: install and migrate succeeded, and `dev:api` refused to
+  start with `ANTHROPIC_API_KEY is required when MODEL_PROVIDER=anthropic (set MODEL_PROVIDER=fake for offline mode)`.
+  That is the documented behaviour (outside compose the provider defaults to `anthropic`, and the README says to set
+  `MODEL_PROVIDER=fake` without a key), not a README defect.
+
+Teardown: `docker compose down -v --rmi local` in the clone, clone directory removed, `docker image prune -f`, the
+worktree's postgres/redis started again.
+
+Not covered by this check: the `anthropic` provider (no API key, keyless run) and the README's
+`cp .env.example .env` step (file not committed yet).

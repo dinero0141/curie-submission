@@ -179,7 +179,7 @@ Complete (Tasks 1–9, 11 and the Task 12 harness, tested with the fake model):
 
 Remaining in the plan:
 - Task 12: the live eval run itself; needs an API key (the harness is written and tested).
-- Task 13: acceptance check and a fresh-clone run of the README. Task 14: final docs.
+- Task 14: final docs. (Task 13, the acceptance check and a fresh-clone run of the README, is done; see [Verification](#verification).)
 - Task 15 (stretch): SSE over Redis Streams.
 
 Next steps beyond the plan:
@@ -203,6 +203,20 @@ Automated (`pnpm test`: 222 tests, 16 files, all passing; `pnpm typecheck` clean
 `FakeModel` replaces the network: scripted replies by question, per-attempt errors, a latch to hold an answer mid-stream, and every request recorded so tests can assert what history was sent. Its citations go through the same verification as real ones.
 
 Manual checks ([docs/notes/manual-checks.md](docs/notes/manual-checks.md)): the compose stack with `MODEL_PROVIDER=fake`, the curl flow from upload to follow-up, offsets sliced against `GET /documents/:id/content`, error responses, clean shutdown. In Task 10 the README example flow was run again against a freshly built stack, plus a failed document (`empty_after_parse`) and the 409 for asking about it. In Task 12 the eval CLI was run once against the compose stack with `MODEL_PROVIDER=fake`: it ran end to end and reported 0/7 with exit code 1, as expected for the demo model (a harness check only), and exit code 2 for an unreachable API.
+
+Acceptance checklist (Task 13; each item checked against the code and tests, tests on `FakeModel`, HTTP checks with `MODEL_PROVIDER=fake`):
+
+| Requirement | What proves it |
+|---|---|
+| Add a document, Markdown and plain text | `documents.test.ts` "prepares the sample document; passages and sentences slice the stored content" (markdown) and "stores the title trimmed and keeps content byte-for-byte (CRLF, emoji)" (`format: text`); `chunking.test.ts` "plain text" block; fresh-clone check uploaded both formats over HTTP |
+| Async preparation; client sees `ready` or why it failed | `documents.test.ts` "fails syntax-only markdown permanently with empty_after_parse after one attempt", "fails permanently with too_many_passages…", "writes failed/preparation_error itself on the final transient attempt", "shows pending documents before the worker picks them up"; `conversations.test.ts` "rejects documents whose preparation failed"; manual: `failed`/`empty_after_parse` over HTTP |
+| Multi-turn conversation about one document | `conversations.test.ts` "sends the earlier turn as history on a follow-up"; `retrieval.test.ts` "keeps a follow-up ranked through the previous question's terms"; `failures.test.ts` (failed turns left out of history); README flow step 5 (seq 1–4) |
+| Answers only from that document, quotes that are in it and locatable | `citations.test.ts` mapping + "verification and dropping" (forged `cited_text`, out-of-range indices, inclusive-`end` misreading, UTF-16 offsets); `conversations.test.ts` "answers the first question with verified citations" (every citation slices the stored content to its quote); `retrieval.test.ts` "only returns passages of the requested document"; README flow step 6 `matches: true`. Grounding against real Claude: **not verified** (keyless) |
+| Clear "not in this document" | `conversations.test.ts` "returns a not-found answer without citations when the model says NOT_IN_DOCUMENT" and "treats a reply without verified citations as not found"; `citations.test.ts` "not answerable" block. Not seen over HTTP (the fake's default answer always cites) |
+| Answer delivered while generation takes time (progressive polling) | `conversations.test.ts` "shows partial content while streaming and rejects a second question with 409" (latched model); `db.test.ts` "answer lifecycle…"; `failures.test.ts` "puts a row back to pending without partial content between retries"; README flow steps 3–4 poll `GET /messages/:id` |
+| Edge cases from Tasks 3–11 | Chunking: CRLF, emoji/CJK, heading without body, lists, 5,000-char sentence, surrogate-safe split, syntax-only (`chunking.test.ts`). Citations: see above. Model boundary: error classes, refusal, timeout, abort (`llm-errors`, `anthropic-model`). API: 400/404/409/413/415, NUL and lone surrogates, body limit, hanging enqueue (`documents`, `conversations`). Workers: retries, final-state rule, idempotent rerun, late failure cannot overwrite `ready`, `max_tokens`, reconciler cases (`documents`, `failures`). Retrieval: needle + neighbours, double stemming, hyphenated terms, tsquery syntax, stopword-only and no-hit fallback (`retrieval`) |
+| Runnable from a clean checkout | Fresh clone of the committed state, `docker compose up -d --build --wait` with no dotenv file, README example flow run unchanged → exit 0 and the README's output ([manual-checks](docs/notes/manual-checks.md)) |
+| Full suite | `pnpm typecheck` clean; `pnpm test` 222/222 in 16 files (run in Task 13) |
 
 Not verified: no real Claude call (shapes assumed, spike not run, eval run only against the fake model), real error bodies, `ranked` mode against the real model (tested only with `FakeModel` on a synthetic document), a real full-length paper, a dotenv value overriding the compose default, load and concurrency, a worker crash mid-job (BullMQ stalled-job path). Details in [README § Verification status](README.md#verification-status).
 
