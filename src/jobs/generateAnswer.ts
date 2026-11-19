@@ -7,8 +7,10 @@
  * `UnrecoverableError`) and on the last attempt for retryable ones (`model_unavailable`). A retryable failure
  * before the last attempt puts the row back to `pending` for BullMQ's backoff. `max_tokens` with at least one
  * verified citation completes with `finish_reason = 'max_tokens'`; without one it fails permanently with
- * `answer_truncated` (it is not evidence that the document lacks the answer). `worker.on('failed')` is only
- * a logging backstop.
+ * `answer_truncated` (it is not evidence that the document lacks the answer). A reply with no verified
+ * citation and no `NOT_IN_DOCUMENT:` marker (uncited, or every citation dropped by verification) fails
+ * permanently with `citations_unverified` and a warn log of the drop reasons: it is not evidence either, and
+ * it is how a wrong Citations shape assumption would show up. `worker.on('failed')` is only a logging backstop.
  */
 import { UnrecoverableError, Worker, type Job } from 'bullmq';
 import type { Redis } from 'ioredis';
@@ -70,14 +72,38 @@ export class AnswerTruncatedError extends Error {
   }
 }
 
+/**
+ * The model answered without the not-found marker but no citation survived verification (it cited nothing, or
+ * every citation was dropped). Permanent: a shape mismatch repeats on every attempt.
+ */
+export class AnswerUnverifiedError extends Error {
+  override readonly name = 'AnswerUnverifiedError';
+  constructor(dropped: number) {
+    super(
+      dropped > 0
+        ? `the answer's ${dropped} citation(s) could not be verified against the document`
+        : 'the answer did not cite the document, so it could not be verified',
+    );
+  }
+}
+
 /** Stored for `internal_error`: the original text (SQL, constraint names, stack details) is only logged. */
 export const INTERNAL_ERROR_MESSAGE = 'internal error while generating the answer';
 
-function classify(err: unknown): ClassifiedError | { code: 'answer_truncated'; retryable: false; message: string } {
+type AnswerOutcomeError = { code: 'answer_truncated' | 'citations_unverified'; retryable: false; message: string };
+
+function classify(err: unknown): ClassifiedError | AnswerOutcomeError {
   if (err instanceof AnswerTruncatedError) return { code: 'answer_truncated', retryable: false, message: err.message };
+  if (err instanceof AnswerUnverifiedError) return { code: 'citations_unverified', retryable: false, message: err.message };
   if (err instanceof AnswerContextError) return { code: 'internal_error', retryable: false, message: INTERNAL_ERROR_MESSAGE };
   const classified = classifyError(err);
   return classified.code === 'internal_error' ? { ...classified, message: INTERNAL_ERROR_MESSAGE } : classified;
+}
+
+function shapeOf(c: unknown): { type: unknown; keys: string[] } | string {
+  if (c === null) return 'null';
+  if (typeof c !== 'object' || Array.isArray(c)) return Array.isArray(c) ? 'array' : typeof c;
+  return { type: (c as Record<string, unknown>).type, keys: Object.keys(c).sort() };
 }
 
 type AnswerContext = {
@@ -173,6 +199,19 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
 
       const resolved = resolveCitations(raw, request.documents, ctx.content);
       if (resolved.notFoundReason === 'truncated') throw new AnswerTruncatedError();
+      if (resolved.notFoundReason === 'unverified') {
+        // Visible in the worker log: a Citations shape mismatch drops every citation with the same reason.
+        deps.log?.warn(
+          {
+            messageId,
+            stopReason: raw.stopReason,
+            // Reason plus the citation's type and keys (no document text) is enough to spot a shape mismatch.
+            dropped: resolved.dropped.map((d) => ({ reason: d.reason, answerBlock: d.answerBlock, shape: shapeOf(d.citation) })),
+          },
+          'answer has no verified citation; failing as citations_unverified',
+        );
+        throw new AnswerUnverifiedError(resolved.dropped.length);
+      }
       // The model saw only part of a large document: "not found" must not read as "the document lacks it".
       const text = !resolved.answerable && retrieval.mode !== 'full' ? NOT_FOUND_IN_SEARCHED_MESSAGE : resolved.text;
       const done = await completeAnswer(deps.pool, messageId, {

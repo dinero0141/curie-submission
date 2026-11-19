@@ -2,9 +2,11 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   CHARS_PER_TOKEN,
+  capHeading,
   ChunkingError,
   chunkDocument,
   estimateTokens,
+  MAX_HEADING_LENGTH,
   type DocumentFormat,
   type Passage,
 } from '../../src/domain/chunking.js';
@@ -40,8 +42,9 @@ function assertInvariants(content: string, format: DocumentFormat, passages: Pas
     expect(p.start).toBe(p.sentences[0]!.start);
     expect(p.end).toBe(p.sentences.at(-1)!.end);
     expect(p.text).toBe(content.slice(p.start, p.end));
-    expect(p.tokenEstimate).toBe(estimateTokens(p.text));
-    if (p.sentences.length > 1) expect(p.tokenEstimate).toBeLessThanOrEqual(limit);
+    // The heading is sent as the passage's document title, so it is counted too.
+    expect(p.tokenEstimate).toBe(estimateTokens(p.text.length + (p.heading?.length ?? 0)));
+    if (p.sentences.length > 1) expect(estimateTokens(p.text)).toBeLessThanOrEqual(limit);
     for (const s of p.sentences) {
       expect(s.start).toBeGreaterThanOrEqual(prevEnd); // ordered, non-overlapping across the document
       expect(s.end).toBeGreaterThan(s.start);
@@ -60,7 +63,7 @@ function assertInvariants(content: string, format: DocumentFormat, passages: Pas
       // never crosses a heading line
       expect(headings.some((h) => h.start > p.start && h.start < p.end)).toBe(false);
       const nearest = headings.filter((h) => h.start < p.start).at(-1);
-      expect(p.heading).toBe(nearest && nearest.text !== '' ? nearest.text : null);
+      expect(p.heading).toBe(nearest && nearest.text !== '' ? capHeading(nearest.text) : null);
     }
   } else {
     // plain text: every non-whitespace char covered exactly once
@@ -222,6 +225,29 @@ describe('chunkDocument — markdown edge cases', () => {
     const passages = chunkDocument(doc, 'markdown');
     expect(passages.map((p) => p.heading)).toEqual(['Closed', 'Hash#', null]);
     expect(sentenceTexts(doc, passages)).toEqual(['One.', 'Two.', 'Three.', '####### seven', '#nospace']);
+  });
+
+  it('caps a ~1.5 MB ATX heading and a multi-line setext heading, and counts the heading in tokenEstimate', () => {
+    const body = Array.from({ length: 40 }, (_, i) => `Sentence number ${i} is here.`).join(' ');
+    const atx = `# ${'word '.repeat(300_000)}\n\n${body}\n`;
+    const setextLines = Array.from({ length: 100 }, (_, i) => `line ${i} of a long paragraph`).join('\n');
+    const setext = `${setextLines}\n---\n\n${body}\n`;
+    for (const doc of [atx, setext]) {
+      const passages = chunkDocument(doc, 'markdown', { passageTokens: 50 });
+      expect(passages.length).toBeGreaterThan(1);
+      for (const p of passages) {
+        expect(p.heading!.length).toBeLessThanOrEqual(MAX_HEADING_LENGTH);
+        expect(p.heading!.endsWith('…')).toBe(true);
+        expect(p.heading).not.toMatch(/\s{2,}|\n/);
+        expect(p.tokenEstimate).toBe(estimateTokens(p.text.length + p.heading!.length));
+      }
+    }
+    // Cut at a word boundary; a short heading is only whitespace-collapsed; no lone surrogate at the cut.
+    expect(capHeading('word '.repeat(100))).toMatch(/^(word )+word…$/);
+    expect(capHeading('  A \t heading\n ')).toBe('A heading');
+    const emoji = capHeading('🚀'.repeat(150));
+    expect(emoji.length).toBeLessThanOrEqual(MAX_HEADING_LENGTH);
+    expect(emoji.slice(0, -1)).toBe('🚀'.repeat((emoji.length - 1) / 2));
   });
 
   it('chunks ~1 MB pathological lines in linear time (no regex backtracking)', () => {

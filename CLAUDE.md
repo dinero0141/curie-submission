@@ -18,6 +18,7 @@ Rules given to the coding agents that implement this repo. The plan lives in `do
 
 ## Debugging
 - A "not found" or odd answer: read `messages.retrieval.debug` (via `GET /messages/:id`): `notFoundReason`, `rawText` (model text when not answerable), `dropped[]` (each dropped citation with its reason), `query.text` / `query.tsquery` (ranked mode). `retrieval.mode`, `passageOrdinals` and `hits` say what the model saw.
+- A `citations_unverified` failure has no `retrieval`; the worker's warn log (`answer has no verified citation`) lists each dropped citation's reason, type and keys. The same reason on every answer means a Citations shape assumption is wrong (`docs/notes/citations-spike.md`).
 - `LOG_LEVEL=debug` for both processes; the worker logs each reconciler repair (`reconciler repaired rows`) and every internal error with its original text (the row only stores a generic message).
 - Point tests elsewhere with `TEST_DATABASE_URL` / `TEST_REDIS_URL`. If `curie_test` is missing, the Postgres volume predates `docker/postgres-init.sql`: `docker compose down -v` and start again.
 

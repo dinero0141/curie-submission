@@ -205,7 +205,7 @@ Errors: `404 not_found`.
 |---|---|
 | `status` | See lifecycle below. |
 | `content` | `pending`: `""`. `streaming`: partial raw model text, grows over time. `completed`: final text. `failed`: `""`. |
-| `answerable` | `null` until `completed`. `true`: grounded answer with ≥ 1 verified citation. `false`: no grounded answer; `content` is a fixed not-found message and `citations` is `[]`. With `retrieval.mode: "full"` the whole document was sent; with `ranked`/`fallback` only part of it was, and the message says so. |
+| `answerable` | `null` until `completed`. `true`: grounded answer with ≥ 1 verified citation. `false`: the model said the document does not answer the question (`NOT_IN_DOCUMENT:`); `content` is a fixed not-found message and `citations` is `[]`. A reply with no verified citation and no such statement is never `false`: it fails with `citations_unverified` (or `answer_truncated`). With `retrieval.mode: "full"` the whole document was sent; with `ranked`/`fallback` only part of it was, and the message says so. |
 | `citations[]` | Verified quotations, in answer order. `quote` is `content.slice(startOffset, endOffset)` of the **document** (never model-written text); `heading` is the nearest Markdown heading (or `null`); `passageId` is internal. `[answerStart, answerEnd)` is the span of the **answer** `content` that this quote supports, for linking a claim to its source. A quote that spans several sentences is one contiguous slice, so it includes any Markdown syntax between them (list or quote markers, table pipes) that was masked out of what the model saw. |
 | `finishReason` | Model stop reason, e.g. `end_turn`; `max_tokens` means the answer was cut at the length limit after at least one verified citation (a cut answer with none fails with `answer_truncated`). |
 | `error` | `{code, message}` when `failed`, else `null`. |
@@ -289,6 +289,7 @@ Answer `error.code`:
 | `model_config_error` | Request rejected (bad key, unknown model, invalid request) | No; operator problem |
 | `model_refused` | The model declined to answer | Rephrase |
 | `answer_truncated` | The answer hit the `max_tokens` limit before it cited the document; says nothing about whether the document answers the question. Not retried | Ask a narrower question; operators can raise `MAX_ANSWER_TOKENS` |
+| `citations_unverified` | The model answered, but no citation could be verified against the document (it cited nothing, or every citation failed verification); says nothing about whether the document answers the question. Not retried; the worker log has each drop reason | Ask again or rephrase; if it happens for every question, operators should check the Citations shapes (`docs/notes/citations-spike.md`) |
 | `internal_error` | Server bug or inconsistent data; `message` is generic (details are only in the worker log) | Ask again |
 | `stalled` | Job lost or failed outside the processor | Ask again |
 

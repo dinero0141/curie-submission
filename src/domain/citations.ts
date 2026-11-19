@@ -3,7 +3,8 @@
  *
  * Built against the Citations shapes in `docs/notes/citations-spike.md`. Those shapes are ASSUMED (from the
  * claude-api skill and the `@anthropic-ai/sdk` 1.10.0 types) and were NOT observed live. The code is written
- * so that a wrong assumption can only drop a citation, never produce a wrong quote:
+ * so that a wrong assumption can only drop a citation, never produce a wrong quote (and an answer left with no
+ * verified citation is `unverified`, which fails the answer, never shown as "not in the document"):
  * - only `content_block_location` citations are accepted; indices must be integers inside what we sent;
  * - `cited_text` must equal the cited blocks joined, compared with all whitespace removed (the separator is
  *   undocumented). This is the check that tests the model's output: if the index semantics were different
@@ -86,17 +87,23 @@ export type DroppedCitation = {
 
 export type ResolvedAnswer = {
   answerable: boolean;
-  /** Text to display: the model text if answerable, else `NOT_FOUND_MESSAGE`. */
+  /**
+   * Text to display: the model text if answerable, `NOT_FOUND_MESSAGE` for `not_in_document`, else `''`
+   * (`truncated` and `unverified` are failed by the processor, never displayed).
+   */
   text: string;
   citations: Citation[];
   dropped: DroppedCitation[];
   /** The model's text blocks concatenated, kept for debugging. */
   rawText: string;
   /**
-   * Why `answerable` is false. `truncated`: the reply hit `max_tokens` before any citation survived, so
-   * nothing can be said about the document (the processor fails the answer with `answer_truncated`).
+   * Why `answerable` is false. Only `not_in_document` (the model's explicit marker) means the document lacks
+   * the answer. `truncated`: the reply hit `max_tokens` before any citation survived (the processor fails it
+   * with `answer_truncated`). `unverified`: the model answered but no citation survived verification, either
+   * because it cited nothing or because every citation was dropped (the likely sign of a Citations shape
+   * mismatch); the processor fails it with `citations_unverified`, never as "not in the document".
    */
-  notFoundReason: 'not_in_document' | 'no_verified_citations' | 'truncated' | null;
+  notFoundReason: 'not_in_document' | 'unverified' | 'truncated' | null;
 };
 
 /** Build the document we send for a passage: the block texts are exact slices of the content. */
@@ -144,8 +151,8 @@ function locate(c: RawCitation, sent: SentDocument[], content: string): Located 
 /**
  * Map the model's citations to verified source quotations and decide whether the answer is grounded.
  * Not answerable when the reply starts with `NOT_IN_DOCUMENT_MARKER` (after leading whitespace) or when no
- * citation survives verification; in the second case a `max_tokens` stop is reported as `truncated`, not as
- * "not in the document".
+ * citation survives verification. Only the marker is reported as "not in the document"; otherwise a
+ * `max_tokens` stop is `truncated` and anything else is `unverified`.
  */
 export function resolveCitations(raw: RawAnswer, sent: SentDocument[], content: string): ResolvedAnswer {
   const citations: Citation[] = [];
@@ -182,11 +189,12 @@ export function resolveCitations(raw: RawAnswer, sent: SentDocument[], content: 
     : citations.length === 0
       ? raw.stopReason === 'max_tokens'
         ? 'truncated'
-        : 'no_verified_citations'
+        : 'unverified'
       : null;
 
   if (notFoundReason) {
-    return { answerable: false, text: NOT_FOUND_MESSAGE, citations: [], dropped, rawText, notFoundReason };
+    const text = notFoundReason === 'not_in_document' ? NOT_FOUND_MESSAGE : '';
+    return { answerable: false, text, citations: [], dropped, rawText, notFoundReason };
   }
   return { answerable: true, text: rawText, citations, dropped, rawText, notFoundReason: null };
 }

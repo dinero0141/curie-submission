@@ -68,6 +68,7 @@ services:
       PORT: "3000"
     ports:
       - "${API_PORT:-3000}:3000"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 3s
@@ -89,6 +90,9 @@ services:
     # still killed mid-stream (a longer MODEL_TIMEOUT_MS), its row stays in flight until BullMQ's stalled-job
     # check reruns it on the next worker (the rerun clears partial content first).
     stop_grace_period: 120s
+    # The stalled-job rerun and the reconciler (lost jobs, stuck rows) run only in a live worker, so a crashed
+    # worker must come back; without a restart the API keeps accepting work that nothing processes.
+    restart: unless-stopped
     depends_on:
       migrate:
         condition: service_completed_successfully

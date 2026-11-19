@@ -20,11 +20,15 @@ export type Passage = {
   ordinal: number;
   start: number;
   end: number;
-  /** Text of the nearest preceding heading, or null (plain text, or text before any heading). */
+  /**
+   * Text of the nearest preceding heading (whitespace collapsed, at most `MAX_HEADING_LENGTH` chars), or null
+   * (plain text, or text before any heading).
+   */
   heading: string | null;
   sentences: Span[];
   /** `content.slice(start, end)`. */
   text: string;
+  /** Estimated tokens of `text` plus `heading`: the heading is sent as the passage's document title. */
   tokenEstimate: number;
 };
 
@@ -56,6 +60,25 @@ export const CHARS_PER_TOKEN = 4;
 export function estimateTokens(text: string | number): number {
   const len = typeof text === 'number' ? text : text.length;
   return Math.ceil(len / CHARS_PER_TOKEN);
+}
+
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+/**
+ * Longest stored heading. A heading is copied into every passage of its section (row, `tsv`, document title
+ * of every sent passage), so one huge ATX line or setext paragraph must not be multiplied by the passage count.
+ */
+export const MAX_HEADING_LENGTH = 200;
+
+/** Collapse whitespace and cut to `MAX_HEADING_LENGTH` chars (at a word boundary when possible, with `…`). */
+export function capHeading(text: string): string {
+  const flat = text.replace(/\s+/gu, ' ').trim();
+  if (flat.length <= MAX_HEADING_LENGTH) return flat;
+  let cut = MAX_HEADING_LENGTH - 1; // room for the ellipsis
+  const space = flat.lastIndexOf(' ', cut);
+  if (space >= MAX_HEADING_LENGTH / 2) cut = space;
+  else if (isLowSurrogate(flat.charCodeAt(cut))) cut--; // never split a surrogate pair
+  return `${flat.slice(0, cut).trimEnd()}…`;
 }
 
 type Block = { start: number; end: number; section: number; heading: string | null };
@@ -139,7 +162,8 @@ function scanMarkdown(content: string): { blocks: Block[]; masked: string } {
   const setHeading = (text: string) => {
     flush();
     section++;
-    heading = text === '' ? null : text;
+    const capped = capHeading(text);
+    heading = capped === '' ? null : capped;
   };
 
   for (const [i, line] of lines.entries()) {
@@ -172,7 +196,7 @@ function scanMarkdown(content: string): { blocks: Block[]; masked: string } {
       continue;
     }
     if (para && para.kind === 'plain' && !para.quoted && SETEXT.test(raw)) {
-      const text = content.slice(para.start, para.end).replace(/\s+/g, ' ').trim();
+      const text = content.slice(para.start, para.end);
       para = null;
       setHeading(text);
       continue;
@@ -249,8 +273,6 @@ function trimSpan(text: string, start: number, end: number): Span | null {
   return end > start ? { start, end } : null;
 }
 
-const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
-
 /** Split an over-long span into pieces of at most `maxChars`, at whitespace when possible. */
 function hardSplit(text: string, span: Span, maxChars: number): Span[] {
   const pieces: Span[] = [];
@@ -313,7 +335,7 @@ export function chunkDocument(content: string, format: DocumentFormat, opts: Chu
       heading: cur.heading,
       sentences: cur.sentences,
       text,
-      tokenEstimate: estimateTokens(text),
+      tokenEstimate: estimateTokens(text.length + (cur.heading?.length ?? 0)),
     });
     cur = null;
   };

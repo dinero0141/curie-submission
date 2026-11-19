@@ -230,15 +230,15 @@ describe('conversation flow', () => {
     });
   });
 
-  it('treats a reply without verified citations as not found', async () => {
+  it('fails a reply without verified citations as citations_unverified, not as not found', async () => {
     const res = await start('An uncited guess?');
     const answer = await poll(`/messages/${res.json().assistantMessageId}`, terminal);
     expect(answer).toMatchObject({
-      status: 'completed',
-      answerable: false,
-      content: NOT_FOUND_MESSAGE,
+      status: 'failed',
+      answerable: null,
+      content: '',
       citations: [],
-      retrieval: { debug: { notFoundReason: 'no_verified_citations', rawText: 'Probably around forty questions.' } },
+      error: { code: 'citations_unverified', message: expect.stringContaining('did not cite') },
     });
   });
 });

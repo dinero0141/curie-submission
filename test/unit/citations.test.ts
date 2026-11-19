@@ -245,20 +245,30 @@ describe('resolveCitations — not answerable', () => {
     }
   });
 
-  it('treats a reply with no citations as not answerable', () => {
+  it('reports a reply with no citations as unverified, not as not-in-document', () => {
     const r = resolveCitations(answer({ text: 'The team had twelve people.' }), docs, content);
-    expect(r).toMatchObject({ answerable: false, text: NOT_FOUND_MESSAGE, citations: [], notFoundReason: 'no_verified_citations' });
+    expect(r).toMatchObject({ answerable: false, text: '', citations: [], notFoundReason: 'unverified' });
     expect(r.rawText).toBe('The team had twelve people.');
   });
 
-  it('treats a reply whose citations were all dropped as not answerable and reports them', () => {
+  it('reports a reply whose citations were all dropped as unverified (not as not-in-document) and lists them', () => {
     const r = resolveCitations(
       answer({ text: 'Claim.', citations: [cite(docs, results, 0, 1, 'invented'), { ...cite(docs, 0, 0, 1), document_index: 50 }] }),
       docs,
       content,
     );
-    expect(r).toMatchObject({ answerable: false, text: NOT_FOUND_MESSAGE, citations: [], notFoundReason: 'no_verified_citations' });
+    expect(r).toMatchObject({ answerable: false, text: '', citations: [], notFoundReason: 'unverified' });
+    expect(r.text).not.toBe(NOT_FOUND_MESSAGE);
     expect(r.dropped.map((d) => d.reason)).toEqual(['cited_text_mismatch', 'document_out_of_range']);
+  });
+
+  it('reports a shape mismatch that drops every citation (1-based indices, other type) as unverified', () => {
+    const good = cite(docs, results, 0, 1);
+    const oneBased = { ...good, start_block_index: 1, end_block_index: 2 };
+    const otherType = { ...good, type: 'search_result_location' };
+    const r = resolveCitations(answer({ text: 'A real answer.', citations: [oneBased, otherType] }), docs, content);
+    expect(r).toMatchObject({ answerable: false, text: '', citations: [], notFoundReason: 'unverified' });
+    expect(r.dropped.map((d) => d.reason)).toEqual(['cited_text_mismatch', 'unsupported_type']);
   });
 
   it('reports a max_tokens reply with no surviving citation as truncated, not as not-in-document', () => {
@@ -274,7 +284,7 @@ describe('resolveCitations — not answerable', () => {
 
   it('treats an empty reply as not answerable', () => {
     const r = resolveCitations(answer(), docs, content);
-    expect(r).toMatchObject({ answerable: false, text: NOT_FOUND_MESSAGE, rawText: '', notFoundReason: 'no_verified_citations' });
+    expect(r).toMatchObject({ answerable: false, text: '', rawText: '', notFoundReason: 'unverified' });
   });
 
   it('does not treat the marker in the middle of a cited answer as not-found', () => {

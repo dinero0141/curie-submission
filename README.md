@@ -182,8 +182,8 @@ pnpm typecheck
 ```
 
 Integration tests use the `curie_test` database (created on first Postgres volume init) and fail fast with a hint if
-Postgres or Redis is down. All tests use the fake model. Current result: 252 tests in 18 files pass (152 unit,
-100 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
+Postgres or Redis is down. All tests use the fake model. Current result: 255 tests in 18 files pass (154 unit,
+101 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
 
 `pnpm spike` (`scripts/spike-citations.ts`) dumps raw Citations responses for the sample document and needs an
 Anthropic key.
@@ -215,7 +215,7 @@ the eval does not cover `ranked` retrieval.
 This build had **no Anthropic API key** (a deliberate decision to continue keyless). So:
 
 Verified:
-- `pnpm typecheck` and `pnpm test`: 252/252 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
+- `pnpm typecheck` and `pnpm test`: 255/255 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
   workers in the integration tests.
 - The example flow above, over HTTP against the compose stack with `MODEL_PROVIDER=fake`: upload → ready → ask →
   poll → follow-up → offsets slice the stored content; plus 400/404/409/415 responses and a failed document
@@ -227,8 +227,9 @@ Not verified:
   has not accepted or answered one of our requests.
 - The Citations request/response shapes are assumed from the Claude API docs and the SDK types
   ([docs/notes/citations-spike.md](docs/notes/citations-spike.md) marks each fact UNVERIFIED). If an assumption is
-  wrong, citation verification drops the quotes (the answer then becomes "not found"); it cannot show a quote that
-  is not in the document.
+  wrong, citation verification drops the quotes and the answer fails with `citations_unverified` (logged by the
+  worker with each drop reason); it cannot show a quote that is not in the document, and it is never reported as
+  "not in the document".
 - `pnpm spike` has not been run, and `pnpm eval` has not been run against real Claude (only against the fake model,
   to check the harness); answer quality, `NOT_IN_DOCUMENT:` adherence and real latency are unknown. Real API error bodies (over-long prompt, 529, refusal) were not observed.
 - Ranked retrieval for documents larger than `FULL_CONTEXT_TOKENS` is tested against real Postgres full-text

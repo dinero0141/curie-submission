@@ -8,7 +8,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { UnrecoverableError, Worker } from 'bullmq';
 import type { FastifyInstance } from 'fastify';
 import type { Redis } from 'ioredis';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { insertConversation } from '../../src/db/conversations.js';
 import { getDocumentSummary, insertDocument, markDocumentProcessing } from '../../src/db/documents.js';
@@ -63,6 +63,13 @@ fake.script({
   }),
 });
 fake.script({ match: 'cut before citing', reply: { text: 'The prototype found a relevant', stopReason: 'max_tokens' } });
+// Every citation fails verification (wrong cited_text, as a Citations shape mismatch would produce).
+fake.script({
+  match: 'unverifiable citations',
+  reply: (req) => ({
+    blocks: [{ text: 'The prototype was faster.', citations: [{ ...(fakeCitation(req, 0, 0) as object), cited_text: 'Not what we sent.' }] }],
+  }),
+});
 // First attempt streams half its text, waits at the latch, then fails with a 529.
 fake.script({ match: 'retry later', errors: [overloaded()], latch: true, midStreamErrors: true });
 fake.script({ match: 'superseded meanwhile', latch: true });
@@ -251,6 +258,33 @@ describe('generate-answer final-state rule', () => {
     });
     const job = await queues.generateAnswer.getJob(ids.assistantMessageId);
     expect(await job!.getState()).toBe('failed');
+  });
+
+  it('fails a reply whose citations were all dropped as citations_unverified, logged, not as not-found', async () => {
+    const { ids, answer } = await answerOf('Any unverifiable citations?');
+    expect(answer).toMatchObject({
+      status: 'failed',
+      answerable: null,
+      content: '',
+      attempts: 1,
+      error: { code: 'citations_unverified', message: expect.stringContaining('1 citation(s) could not be verified') },
+    });
+    const job = await queues.generateAnswer.getJob(ids.assistantMessageId);
+    expect(await job!.getState()).toBe('failed');
+
+    // The drop reasons reach the worker log (shape only, no document text).
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const conversation = await insertConversation(env.pool, docId);
+    await insertMessage(env.pool, { conversationId: conversation.id, role: 'user', content: 'Any unverifiable citations?' });
+    const assistant = await insertMessage(env.pool, { conversationId: conversation.id, role: 'assistant' });
+    const processor = createGenerateAnswerProcessor({ pool: env.pool, model: fake, fullContextTokens: 60_000, partialWriteMs: 10, log });
+    await expect(processor(directJob(assistant.id))).rejects.toBeInstanceOf(UnrecoverableError);
+    const [entry] = log.warn.mock.calls.filter(([, msg]) => String(msg).includes('citations_unverified'));
+    expect(entry?.[0]).toMatchObject({
+      messageId: assistant.id,
+      dropped: [{ reason: 'cited_text_mismatch', answerBlock: 0, shape: { type: 'content_block_location' } }],
+    });
+    expect(JSON.stringify(entry?.[0])).not.toContain('Not what we sent.');
   });
 
   /** Drive the processor directly (no worker, no job) to observe row state deterministically. */
