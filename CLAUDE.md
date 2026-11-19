@@ -1,6 +1,6 @@
 # Curie — agent rules
 
-Rules given to the coding agents that implement this repo. The plan lives in `docs/plans/`.
+Rules given to the coding agents that implement this repo. During the build, the task plan lived in `docs/plans/` (not included in the submission).
 
 ## Stack
 - Node 22, TypeScript (ESM, `module: nodenext` — relative imports use `.js` extensions), pnpm.
