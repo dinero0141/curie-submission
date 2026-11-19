@@ -6,12 +6,13 @@
  * so BullMQ does not retry), and on the last attempt for anything else (`preparation_error`).
  * `worker.on('failed')` is only a logging backstop.
  */
-import { UnrecoverableError, Worker, type Job } from 'bullmq';
+import { UnrecoverableError, type Job, type Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import type pg from 'pg';
 import type { Logger } from 'pino';
 import {
   getDocument,
+  getDocumentSummary,
   lockDocumentStatus,
   markDocumentFailed,
   markDocumentProcessing,
@@ -20,13 +21,16 @@ import {
 import { replacePassages } from '../db/passages.js';
 import { withTx } from '../db/pool.js';
 import { ChunkingError, chunkDocument, type Passage } from '../domain/chunking.js';
-import { isFinalAttempt, messageOf, QUEUE_NAMES, type PrepareDocumentJobData } from './queues.js';
+import { createWorker, isFinalAttempt, QUEUE_NAMES, type PrepareDocumentJobData, type WorkerOptions } from './queues.js';
 
 /**
  * Upper bound on passages per document. A 5 MB document of ~400-token passages is ~3,300 passages;
  * this only trips on pathological input (e.g. a heading every few words), which fails permanently.
  */
 export const MAX_PASSAGES = 20_000;
+
+/** Stored for `preparation_error`: the original text (SQL, constraint names) is only logged. */
+export const PREPARATION_ERROR_MESSAGE = 'internal error while preparing the document';
 
 export type PrepareDocumentDeps = {
   pool: pg.Pool;
@@ -52,7 +56,7 @@ export function createPrepareDocumentProcessor(deps: PrepareDocumentDeps) {
     try {
       // Guarded transition: a stale rerun of a ready/failed document does nothing.
       if (!(await markDocumentProcessing(deps.pool, documentId))) {
-        const exists = (await getDocument(deps.pool, documentId)) !== null;
+        const exists = (await getDocumentSummary(deps.pool, documentId)) !== null;
         return { outcome: 'skipped', reason: exists ? 'terminal' : 'missing' };
       }
       const doc = await getDocument(deps.pool, documentId);
@@ -72,9 +76,10 @@ export function createPrepareDocumentProcessor(deps: PrepareDocumentDeps) {
       });
     } catch (err) {
       const permanent = err instanceof ChunkingError;
+      if (!permanent) deps.log?.error({ documentId, attemptsMade: job.attemptsMade, err }, 'error while preparing a document');
       if (permanent || isFinalAttempt(job)) {
         const code = permanent ? err.code : 'preparation_error';
-        const message = permanent ? err.message : `document preparation failed: ${messageOf(err)}`;
+        const message = permanent ? err.message : PREPARATION_ERROR_MESSAGE;
         try {
           await markDocumentFailed(deps.pool, documentId, code, message);
         } catch (writeErr) {
@@ -88,33 +93,19 @@ export function createPrepareDocumentProcessor(deps: PrepareDocumentDeps) {
   };
 }
 
-export type PrepareDocumentWorkerOptions = {
-  prefix?: string;
-  concurrency?: number;
-};
-
 export function createPrepareDocumentWorker(
   connection: Redis,
   deps: PrepareDocumentDeps,
-  opts: PrepareDocumentWorkerOptions = {},
+  opts: WorkerOptions = {},
 ): Worker<PrepareDocumentJobData, PrepareDocumentResult> {
   const processor = createPrepareDocumentProcessor(deps);
-  const worker = new Worker<PrepareDocumentJobData, PrepareDocumentResult>(
-    QUEUE_NAMES.prepareDocument,
-    (job) => processor(job),
-    {
-      connection,
-      concurrency: opts.concurrency ?? 2,
-      ...(opts.prefix ? { prefix: opts.prefix } : {}),
-    },
-  );
-  // Logging backstop only: terminal row state was already written by the processor.
-  worker.on('failed', (job, err) => {
-    deps.log?.warn(
-      { documentId: job?.data.documentId, attemptsMade: job?.attemptsMade, err: messageOf(err) },
-      'prepare-document attempt failed',
-    );
+  return createWorker<PrepareDocumentJobData, PrepareDocumentResult>({
+    name: QUEUE_NAMES.prepareDocument,
+    processor: (job) => processor(job),
+    idKey: 'documentId',
+    connection,
+    log: deps.log,
+    concurrency: opts.concurrency ?? 2,
+    prefix: opts.prefix,
   });
-  worker.on('error', (err) => deps.log?.error({ err }, 'prepare-document worker error'));
-  return worker;
 }

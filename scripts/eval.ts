@@ -1,5 +1,5 @@
 /**
- * Live eval (plan Task 12): drives the real HTTP API end to end with the questions in
+ * Live eval: drives the real HTTP API end to end with the questions in
  * `samples/eval-questions.json`. Uploads the sample document, waits until it is ready, runs every conversation
  * (turns after the first are follow-ups in the same conversation), checks each answer (`scripts/eval-check.ts`:
  * answerable expectation + expected substring in some citation quote + offsets slice the stored content),

@@ -5,7 +5,9 @@
  */
 import { type AnswerView, type EvalRow, type EvalSuite, checkAnswer } from './eval-check.js';
 
-export class HarnessError extends Error {}
+export class HarnessError extends Error {
+  override readonly name = 'HarnessError';
+}
 
 export type RunOptions = {
   baseUrl: string;

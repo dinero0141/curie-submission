@@ -2,7 +2,7 @@
  * BullMQ queues and Redis connections shared by the API (producer) and the worker (consumer).
  * Job ids are the row ids (`documentId`, `assistantMessageId`), so enqueueing twice is a no-op.
  */
-import { Queue, type DefaultJobOptions, type Job } from 'bullmq';
+import { Queue, Worker, type DefaultJobOptions, type Job, type Processor } from 'bullmq';
 import { Redis } from 'ioredis';
 import type { Logger } from 'pino';
 
@@ -29,8 +29,11 @@ export function isFinalAttempt(job: Pick<Job, 'attemptsMade' | 'opts'>): boolean
   return job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
 }
 
-/** Error text for logs and stored failure messages. */
-export function messageOf(err: unknown): string {
+/** Request-path wait for an enqueue before deferring it to the reconciler (`enqueueOrDefer`). */
+export const ENQUEUE_TIMEOUT_MS = 2_000;
+
+/** Error text only, for the deliberately terse Redis outage log (other logs pass the Error itself). */
+function messageOf(err: unknown): string {
   return err instanceof Error ? err.message || err.name : String(err);
 }
 
@@ -132,4 +135,36 @@ export async function enqueueOrDefer(
 ): Promise<void> {
   const enqueued = await settlesWithin(enqueue, ms);
   if (!enqueued.ok) log.warn({ ...context, err: enqueued.error }, `${what} enqueue deferred to reconciler`);
+}
+
+export type WorkerOptions = {
+  /** BullMQ key prefix (tests use a unique one per file). */
+  prefix?: string;
+  concurrency?: number;
+};
+
+/**
+ * A BullMQ worker with the shared logging backstop. Terminal row state is written by the processor itself,
+ * so `failed` only logs the attempt (with the row id under `idKey`) and `error` logs worker-level errors.
+ */
+export function createWorker<D extends object, R>(spec: {
+  name: string;
+  processor: Processor<D, R>;
+  idKey: keyof D & string;
+  connection: Redis;
+  log: Pick<Logger, 'warn' | 'error'> | undefined;
+  concurrency: number;
+  prefix: string | undefined;
+}): Worker<D, R> {
+  const { name, idKey, log } = spec;
+  const worker = new Worker<D, R>(name, spec.processor, {
+    connection: spec.connection,
+    concurrency: spec.concurrency,
+    ...(spec.prefix ? { prefix: spec.prefix } : {}),
+  });
+  worker.on('failed', (job, err) => {
+    log?.warn({ [idKey]: job?.data[idKey], attemptsMade: job?.attemptsMade, err }, `${name} attempt failed`);
+  });
+  worker.on('error', (err) => log?.error({ err }, `${name} worker error`));
+  return worker;
 }

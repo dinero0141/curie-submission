@@ -5,36 +5,25 @@ import { createPool } from './db/pool.js';
 import { buildApp } from './http/app.js';
 import { closeQueues, createQueues, createRedisConnection } from './jobs/queues.js';
 import { loadEnvFile } from './loadEnv.js';
+import { onShutdown } from './shutdown.js';
 
 // First statement: the modules above only read the environment when called.
 loadEnvFile();
 
-const level = process.env.LOG_LEVEL ?? 'info';
+const config = loadConfig();
+const level = config.logLevel;
 // Connection-level errors (Redis outage, idle Postgres client) are logged here, not per request.
 const infraLog = pino({ name: 'api', level });
-const config = loadConfig();
 const pool = createPool(config.databaseUrl, { log: infraLog });
 const redis = createRedisConnection(config.redisUrl, infraLog);
 const queues = createQueues(redis);
 const app = buildApp({ pool, config, queues, logger: { level } });
 
-let closing = false;
-async function shutdown(signal: string): Promise<void> {
-  if (closing) return;
-  closing = true;
-  app.log.info({ signal }, 'shutting down');
-  try {
-    await app.close();
-    await closeQueues(queues);
-    await redis.quit();
-    await pool.end();
-    process.exit(0);
-  } catch (err) {
-    app.log.error({ err }, 'shutdown failed');
-    process.exit(1);
-  }
-}
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
-process.on('SIGINT', () => void shutdown('SIGINT'));
+onShutdown(app.log, async () => {
+  await app.close();
+  await closeQueues(queues);
+  await redis.quit();
+  await pool.end();
+});
 
 await app.listen({ host: '0.0.0.0', port: config.port });

@@ -3,13 +3,13 @@
 export type ErrorEnvelope = { error: { code: string; message: string } };
 
 export class HttpError extends Error {
+  override readonly name = 'HttpError';
   constructor(
     readonly statusCode: number,
     readonly code: string,
     message: string,
   ) {
     super(message);
-    this.name = 'HttpError';
   }
 }
 

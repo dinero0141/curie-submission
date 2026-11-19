@@ -57,14 +57,16 @@ describe('reconciler error isolation', () => {
     expect(prepareDocument.add).toHaveBeenCalledTimes(2);
     expect(generateAnswer.add).toHaveBeenCalledTimes(1);
     expect(log.error).toHaveBeenCalledTimes(2);
-    expect(log.error).toHaveBeenCalledWith({ documentId: 'd-bad', err: 'redis blip' }, expect.any(String));
-    expect(log.error).toHaveBeenCalledWith({ messageId: 'm-bad', err: 'redis blip' }, expect.any(String));
+    // The Error itself is logged (pino serializes its stack), not just its message.
+    const blip = expect.objectContaining({ message: 'redis blip' });
+    expect(log.error).toHaveBeenCalledWith({ documentId: 'd-bad', err: blip }, expect.any(String));
+    expect(log.error).toHaveBeenCalledWith({ messageId: 'm-bad', err: blip }, expect.any(String));
   });
 
   it('resolves null (never rejects) when listing stale rows fails', async () => {
     const { reconciler, log } = setup({ documents: [], messages: [] }, [], { failList: true });
     await expect(reconciler.runOnce()).resolves.toBeNull();
-    expect(log.error).toHaveBeenCalledWith({ err: 'connection refused' }, 'reconciler run failed');
+    expect(log.error).toHaveBeenCalledWith({ err: expect.objectContaining({ message: 'connection refused' }) }, 'reconciler run failed');
   });
 
   it('shares one pass between concurrent runOnce calls', async () => {

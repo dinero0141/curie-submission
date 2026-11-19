@@ -6,8 +6,8 @@
  * whose `updated_at` is older than `staleAfterMs` (2 min), it looks the job up by id (job id = row id):
  *
  * - no job (the request-path enqueue timed out or failed, or the job was already removed) → enqueue it;
- * - job `failed` → mark the row `failed/stalled` with the job's last error (the processor's own failure
- *   write did not land, or BullMQ failed the job itself, e.g. it stalled too many times);
+ * - job `failed` → mark the row `failed/stalled` with a fixed message and log the job's last error (the
+ *   processor's own failure write did not land, or BullMQ failed the job itself, e.g. it stalled too many times);
  * - job `completed` but the row is still in flight → mark the row `failed/stalled`;
  * - job active / waiting / delayed / prioritized / waiting-children → leave it (BullMQ owns it).
  *
@@ -18,7 +18,7 @@ import type pg from 'pg';
 import type { Logger } from 'pino';
 import { listStaleInFlightDocuments, markDocumentFailed } from '../db/documents.js';
 import { failAnswer, listStaleInFlightAnswers } from '../db/messages.js';
-import { enqueuePrepareDocument, enqueueGenerateAnswer, messageOf, type Queues } from './queues.js';
+import { enqueuePrepareDocument, enqueueGenerateAnswer, type Queues } from './queues.js';
 
 export const RECONCILE_INTERVAL_MS = 60_000;
 export const STALE_AFTER_MS = 120_000;
@@ -46,14 +46,20 @@ type JobLookup = {
   getJob(id: string): Promise<{ getState(): Promise<string>; failedReason?: string } | undefined>;
 };
 
-type Decision = { action: 'enqueue' } | { action: 'fail'; message: string } | { action: 'leave'; state: string };
+/** Stored on a row whose job failed: `failedReason` may be raw internal error text, so it is only logged. */
+export const JOB_FAILED_MESSAGE = 'the job failed without recording a final state (see the worker log)';
+
+type Decision =
+  | { action: 'enqueue' }
+  | { action: 'fail'; message: string; failedReason?: string }
+  | { action: 'leave'; state: string };
 
 async function decide(queue: JobLookup, id: string): Promise<Decision> {
   const job = await queue.getJob(id);
   if (!job) return { action: 'enqueue' };
   const state = await job.getState();
   if (state === 'failed') {
-    return { action: 'fail', message: `job failed without a terminal row update: ${job.failedReason || 'unknown error'}` };
+    return { action: 'fail', message: JOB_FAILED_MESSAGE, failedReason: job.failedReason || 'unknown error' };
   }
   if (state === 'completed') return { action: 'fail', message: 'job completed but the row was left in flight' };
   // active / waiting / delayed / prioritized / waiting-children: BullMQ still owns it.
@@ -104,12 +110,15 @@ export function createReconciler(deps: ReconcilerDeps) {
           await kind.enqueue(id);
           bucket.enqueued.push(id);
         } else if (d.action === 'fail') {
-          if (await kind.fail(id, d.message)) bucket.failed.push(id);
+          if (await kind.fail(id, d.message)) {
+            bucket.failed.push(id);
+            if (d.failedReason) deps.log?.warn({ [kind.idKey]: id, failedReason: d.failedReason }, 'reconciler: failed row whose job failed');
+          }
         } else {
           bucket.left.push(id);
         }
       } catch (err) {
-        deps.log?.error({ [kind.idKey]: id, err: messageOf(err) }, 'reconciler: row check failed');
+        deps.log?.error({ [kind.idKey]: id, err }, 'reconciler: row check failed');
       }
     }
     return bucket;
@@ -126,7 +135,7 @@ export function createReconciler(deps: ReconcilerDeps) {
   function runOnce(): Promise<ReconcileReport | null> {
     running ??= reconcileOnce()
       .catch((err: unknown) => {
-        deps.log?.error({ err: messageOf(err) }, 'reconciler run failed');
+        deps.log?.error({ err }, 'reconciler run failed');
         return null;
       })
       .finally(() => {

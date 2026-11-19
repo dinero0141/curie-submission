@@ -17,9 +17,6 @@
 import type { RankedHit, RetrievablePassage } from '../domain/retrieval.js';
 import type { Queryable } from './pool.js';
 
-/** Light passage listing for retrieval decisions (no text). */
-export type PassageIndexRow = RetrievablePassage;
-
 export type PassageHit = RankedHit & { id: string };
 
 export type SearchOutcome = {
@@ -31,8 +28,8 @@ export type SearchOutcome = {
   hits: PassageHit[];
 };
 
-/** Every passage's id, ordinal and token estimate, in document order. */
-export async function listPassageIndex(q: Queryable, documentId: string): Promise<PassageIndexRow[]> {
+/** Light listing for retrieval decisions: every passage's id, ordinal and token estimate (no text), in document order. */
+export async function listPassageIndex(q: Queryable, documentId: string): Promise<RetrievablePassage[]> {
   const res = await q.query(
     'SELECT id, ordinal, token_estimate FROM passages WHERE document_id = $1 ORDER BY ordinal',
     [documentId],

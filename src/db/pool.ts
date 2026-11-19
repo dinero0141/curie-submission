@@ -19,7 +19,7 @@ export function createPool(connectionString: string, opts: PoolOptions = {}): pg
     max: opts.max ?? 10,
   });
   // An idle client erroring (e.g. Postgres restart) must not crash the process; the pool replaces it.
-  pool.on('error', (err) => opts.log?.warn({ err: err.message }, 'idle postgres client error'));
+  pool.on('error', (err) => opts.log?.warn({ err }, 'idle postgres client error'));
   return pool;
 }
 

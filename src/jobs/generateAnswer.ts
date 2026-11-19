@@ -12,7 +12,7 @@
  * permanently with `citations_unverified` and a warn log of the drop reasons: it is not evidence either, and
  * it is how a wrong Citations shape assumption would show up. `worker.on('failed')` is only a logging backstop.
  */
-import { UnrecoverableError, Worker, type Job } from 'bullmq';
+import { UnrecoverableError, type Job, type Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import type pg from 'pg';
 import type { Logger } from 'pino';
@@ -29,7 +29,7 @@ import {
 } from '../db/messages.js';
 import { getPassagesByOrdinals, listPassages, type PassageRow } from '../db/passages.js';
 import { listPassageIndex, searchPassages, type SearchOutcome } from '../db/search.js';
-import { NOT_FOUND_IN_SEARCHED_MESSAGE, resolveCitations } from '../domain/citations.js';
+import { resolveCitations } from '../domain/citations.js';
 import {
   RANKED_TOP_K,
   fitsFullContext,
@@ -41,7 +41,7 @@ import { classifyError, type ClassifiedError } from '../llm/errors.js';
 import { buildRequest } from '../llm/prompt.js';
 import type { AnswerModel } from '../llm/types.js';
 import { PartialWriter } from './partialWriter.js';
-import { isFinalAttempt, messageOf, QUEUE_NAMES, type GenerateAnswerJobData } from './queues.js';
+import { createWorker, isFinalAttempt, QUEUE_NAMES, type GenerateAnswerJobData, type WorkerOptions } from './queues.js';
 
 /** Default interval between partial `content` writes while an answer streams. */
 export const PARTIAL_WRITE_INTERVAL_MS = 400;
@@ -188,7 +188,7 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
       const writer = new PartialWriter(
         (content) => writePartialContent(deps.pool, messageId, content),
         partialWriteMs,
-        (err) => deps.log?.warn({ messageId, err: messageOf(err) }, 'partial content write failed'),
+        (err) => deps.log?.warn({ messageId, err }, 'partial content write failed'),
       );
       let raw;
       try {
@@ -197,7 +197,8 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
         await writer.stop();
       }
 
-      const resolved = resolveCitations(raw, request.documents, ctx.content);
+      // The model saw only part of a large document: "not found" must not read as "the document lacks it".
+      const resolved = resolveCitations(raw, request.documents, ctx.content, { partial: retrieval.mode !== 'full' });
       if (resolved.notFoundReason === 'truncated') throw new AnswerTruncatedError();
       if (resolved.notFoundReason === 'unverified') {
         // Visible in the worker log: a Citations shape mismatch drops every citation with the same reason.
@@ -212,10 +213,8 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
         );
         throw new AnswerUnverifiedError(resolved.dropped.length);
       }
-      // The model saw only part of a large document: "not found" must not read as "the document lacks it".
-      const text = !resolved.answerable && retrieval.mode !== 'full' ? NOT_FOUND_IN_SEARCHED_MESSAGE : resolved.text;
       const done = await completeAnswer(deps.pool, messageId, {
-        content: text,
+        content: resolved.text,
         answerable: resolved.answerable,
         citations: resolved.citations,
         retrieval: {
@@ -253,7 +252,7 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
       } else {
         // BullMQ retries after a backoff; meanwhile show `pending` without the failed attempt's partial text.
         await requeueAnswer(deps.pool, messageId).catch((writeErr: unknown) =>
-          deps.log?.warn({ messageId, err: messageOf(writeErr) }, 'could not reset answer for retry'),
+          deps.log?.warn({ messageId, err: writeErr }, 'could not reset answer for retry'),
         );
         deps.log?.warn({ messageId, attemptsMade: job.attemptsMade, code: classified.code }, 'answer attempt failed; will retry');
       }
@@ -263,33 +262,19 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
   };
 }
 
-export type GenerateAnswerWorkerOptions = {
-  prefix?: string;
-  concurrency?: number;
-};
-
 export function createGenerateAnswerWorker(
   connection: Redis,
   deps: GenerateAnswerDeps,
-  opts: GenerateAnswerWorkerOptions = {},
+  opts: WorkerOptions = {},
 ): Worker<GenerateAnswerJobData, GenerateAnswerResult> {
   const processor = createGenerateAnswerProcessor(deps);
-  const worker = new Worker<GenerateAnswerJobData, GenerateAnswerResult>(
-    QUEUE_NAMES.generateAnswer,
-    (job, _token, signal) => processor(job, signal),
-    {
-      connection,
-      concurrency: opts.concurrency ?? 4,
-      ...(opts.prefix ? { prefix: opts.prefix } : {}),
-    },
-  );
-  // Logging backstop only: terminal row state was already written by the processor.
-  worker.on('failed', (job, err) => {
-    deps.log?.warn(
-      { messageId: job?.data.messageId, attemptsMade: job?.attemptsMade, err: messageOf(err) },
-      'generate-answer attempt failed',
-    );
+  return createWorker<GenerateAnswerJobData, GenerateAnswerResult>({
+    name: QUEUE_NAMES.generateAnswer,
+    processor: (job, _token, signal) => processor(job, signal),
+    idKey: 'messageId',
+    connection,
+    log: deps.log,
+    concurrency: opts.concurrency ?? 4,
+    prefix: opts.prefix,
   });
-  worker.on('error', (err) => deps.log?.error({ err }, 'generate-answer worker error'));
-  return worker;
 }

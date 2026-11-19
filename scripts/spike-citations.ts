@@ -1,5 +1,5 @@
 /**
- * Throwaway exploration (plan Task 4): confirm the Citations API shapes for custom-content documents
+ * Throwaway exploration: confirm the Citations API shapes for custom-content documents
  * before writing src/domain/citations.ts. Chunks the sample doc, sends it packaged two ways, asks an
  * answerable and an unanswerable question, and dumps the raw `finalMessage()` plus the stream event
  * types to docs/notes/spike-output/. Findings are written up in docs/notes/citations-spike.md.

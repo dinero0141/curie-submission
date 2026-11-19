@@ -6,7 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { getMessage, type MessageRow } from '../../db/messages.js';
 import type { AppDeps } from '../app.js';
 import { notFound } from '../errors.js';
-import { parseId } from './documents.js';
+import { parseId } from '../validation.js';
 
 /** Public JSON shape of a message. User messages carry only the question fields. */
 export function messageJson(m: MessageRow) {

@@ -9,7 +9,7 @@
  * Every mode sends at least one passage when the document has any.
  */
 
-/** Minimal passage shape (a `PassageRow` or a `PassageIndexRow` fits). */
+/** Minimal passage shape (a `PassageRow` or a `listPassageIndex` row fits). */
 export type RetrievablePassage = { id: string; ordinal: number; tokenEstimate: number };
 
 export type RetrievalMode = 'full' | 'ranked' | 'fallback';

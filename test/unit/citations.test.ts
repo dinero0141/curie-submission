@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { chunkDocument, type Passage } from '../../src/domain/chunking.js';
 import {
+  NOT_FOUND_IN_SEARCHED_MESSAGE,
   NOT_FOUND_MESSAGE,
   NOT_IN_DOCUMENT_MARKER,
   resolveCitations,
@@ -261,6 +262,18 @@ describe('resolveCitations — not answerable', () => {
       expect(r, text).toMatchObject({ answerable: false, text: NOT_FOUND_MESSAGE, citations: [], notFoundReason: 'not_in_document' });
       expect(r.rawText).toBe(text);
     }
+  });
+
+  it('says only the searched parts lacked the answer when the model saw part of the document', () => {
+    const marker = answer({ text: 'NOT_IN_DOCUMENT: not stated.' });
+    expect(resolveCitations(marker, docs, content, { partial: true })).toMatchObject({
+      answerable: false,
+      text: NOT_FOUND_IN_SEARCHED_MESSAGE,
+      notFoundReason: 'not_in_document',
+    });
+    // An answerable reply keeps the model text either way.
+    const cited = answer({ text: 'Mira Chen.', citations: [cite(docs, docIndexByHeading(docs, 'Decision'), 2, 3)] });
+    expect(resolveCitations(cited, docs, content, { partial: true })).toMatchObject({ answerable: true, text: 'Mira Chen.' });
   });
 
   it('treats a formatted marker at the start as not-found even with a verified citation', () => {

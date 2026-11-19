@@ -29,7 +29,7 @@ import {
   type PrepareDocumentJobData,
   type Queues,
 } from '../../src/jobs/queues.js';
-import { createReconciler, STALLED } from '../../src/jobs/reconciler.js';
+import { createReconciler, JOB_FAILED_MESSAGE, STALLED } from '../../src/jobs/reconciler.js';
 import { FakeModel, fakeCitation } from '../../src/llm/fake.js';
 import { useIntegrationEnv } from './setup.js';
 
@@ -451,7 +451,8 @@ describe('reconciler', () => {
     expect(report!.answers.failed).toContain(messageId);
     const row = await getMessage(env.pool, messageId);
     expect(row).toMatchObject({ status: 'failed', content: '', errorCode: STALLED });
-    expect(row!.errorMessage).toContain('worker crashed before recording the failure');
+    // The job's failedReason can be raw internal error text: it is logged, never stored.
+    expect(row!.errorMessage).toBe(JOB_FAILED_MESSAGE);
 
     const next = await ask(conversationId, 'How many questions did the hybrid prototype get right?');
     expect(next.statusCode).toBe(202);

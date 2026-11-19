@@ -74,7 +74,7 @@ Infrastructure and tooling:
 | `REDIS_URL` | `redis://localhost:63799` | Redis (BullMQ); compose sets the in-network URL itself |
 | `PORT` | `3000` | API listen port (inside compose always 3000) |
 | `API_PORT` | `3000` | Compose only: host port mapped to the API |
-| `LOG_LEVEL` | `info` | pino level for the API and the worker (`debug` for more) |
+| `LOG_LEVEL` | `info` | pino level for the API and the worker: `fatal`, `error`, `warn`, `info`, `debug` (more), `trace` or `silent`; anything else fails at startup like other invalid config |
 | `TEST_DATABASE_URL` / `TEST_REDIS_URL` | `…/curie_test` on 54329 / `redis://localhost:63799` | Integration tests only |
 | `EVAL_BASE_URL` / `EVAL_VERBOSE` | `http://localhost:3000` / unset | `pnpm eval` only |
 

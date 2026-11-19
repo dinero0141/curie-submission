@@ -107,8 +107,9 @@ export type DroppedCitation = {
 export type ResolvedAnswer = {
   answerable: boolean;
   /**
-   * Text to display: the model text if answerable, `NOT_FOUND_MESSAGE` for `not_in_document`, else `''`
-   * (`truncated` and `unverified` are failed by the processor, never displayed).
+   * Text to display: the model text if answerable; for `not_in_document`, `NOT_FOUND_MESSAGE`, or
+   * `NOT_FOUND_IN_SEARCHED_MESSAGE` when only part of the document was sent; else `''` (`truncated` and
+   * `unverified` are failed by the processor, never displayed).
    */
   text: string;
   citations: Citation[];
@@ -167,13 +168,42 @@ function locate(c: RawCitation, sent: SentDocument[], content: string): Located 
   return { quote: content.slice(startOffset, endOffset), startOffset, endOffset, heading: doc.heading, passageId: doc.passageId };
 }
 
+export type ResolveOptions = {
+  /**
+   * The model saw only part of a large document (`ranked` or `fallback` retrieval): a not-found answer then
+   * reads `NOT_FOUND_IN_SEARCHED_MESSAGE`, because it cannot mean "the document does not say".
+   */
+  partial?: boolean;
+};
+
+/**
+ * Why an answer is not answerable, or `null` when it is. Only the marker means "not in the document"; with no
+ * verified citation, a `max_tokens` stop is `truncated` and anything else is `unverified`.
+ */
+function notFoundReasonOf(
+  rawText: string,
+  citations: Citation[],
+  dropped: DroppedCitation[],
+  stopReason: string,
+): ResolvedAnswer['notFoundReason'] {
+  if (hasNotInDocumentMarker(rawText, citations.length > 0 || dropped.length > 0)) return 'not_in_document';
+  if (citations.length > 0) return null;
+  if (stopReason === 'max_tokens') return 'truncated';
+  return 'unverified';
+}
+
 /**
  * Map the model's citations to verified source quotations and decide whether the answer is grounded.
  * Not answerable when the reply carries the `NOT_IN_DOCUMENT` marker (see `hasNotInDocumentMarker`) or when no
  * citation survives verification. Only the marker is reported as "not in the document"; otherwise a
  * `max_tokens` stop is `truncated` and anything else is `unverified`.
  */
-export function resolveCitations(raw: RawAnswer, sent: SentDocument[], content: string): ResolvedAnswer {
+export function resolveCitations(
+  raw: RawAnswer,
+  sent: SentDocument[],
+  content: string,
+  opts: ResolveOptions = {},
+): ResolvedAnswer {
   const citations: Citation[] = [];
   const dropped: DroppedCitation[] = [];
   let rawText = '';
@@ -203,16 +233,10 @@ export function resolveCitations(raw: RawAnswer, sent: SentDocument[], content: 
     }
   });
 
-  const notFoundReason = hasNotInDocumentMarker(rawText, citations.length > 0 || dropped.length > 0)
-    ? 'not_in_document'
-    : citations.length === 0
-      ? raw.stopReason === 'max_tokens'
-        ? 'truncated'
-        : 'unverified'
-      : null;
-
+  const notFoundReason = notFoundReasonOf(rawText, citations, dropped, raw.stopReason);
   if (notFoundReason) {
-    const text = notFoundReason === 'not_in_document' ? NOT_FOUND_MESSAGE : '';
+    const notFound = opts.partial ? NOT_FOUND_IN_SEARCHED_MESSAGE : NOT_FOUND_MESSAGE;
+    const text = notFoundReason === 'not_in_document' ? notFound : '';
     return { answerable: false, text, citations: [], dropped, rawText, notFoundReason };
   }
   return { answerable: true, text: rawText, citations, dropped, rawText, notFoundReason: null };

@@ -22,15 +22,16 @@ import {
   writePartialContent,
 } from '../../src/db/messages.js';
 import { migrate } from '../../src/db/migrate.js';
-import { getPassagesByOrdinals, listPassages, replacePassages, type NewPassage } from '../../src/db/passages.js';
+import { getPassagesByOrdinals, listPassages, replacePassages } from '../../src/db/passages.js';
 import { isUniqueViolation, withTx } from '../../src/db/pool.js';
+import type { Passage } from '../../src/domain/chunking.js';
 import { useIntegrationEnv } from './setup.js';
 
 const env = useIntegrationEnv();
 
 const CONTENT = '# Results\n\nThe hybrid prototype answered 41 questions. Keyword search 🔎 answered 29.\n';
 
-function passagesFor(content: string): NewPassage[] {
+function passagesFor(content: string): Passage[] {
   const s1 = content.indexOf('The hybrid');
   const e1 = content.indexOf('questions.') + 'questions.'.length;
   const s2 = content.indexOf('Keyword');
@@ -174,7 +175,7 @@ describe('passages', () => {
 
   it('replacePassages is idempotent and handles many rows', async () => {
     const doc = await insertDocument(env.pool, { title: 'Big', format: 'text', content: 'x'.repeat(2000) });
-    const many: NewPassage[] = Array.from({ length: 1200 }, (_, i) => ({
+    const many: Passage[] = Array.from({ length: 1200 }, (_, i) => ({
       ordinal: i,
       start: i,
       end: i + 1,

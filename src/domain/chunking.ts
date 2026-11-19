@@ -38,17 +38,20 @@ export type ChunkingErrorCode = 'empty_after_parse' | 'too_many_passages';
 
 /** Permanent preparation failure: re-running on the same content gives the same result. */
 export class ChunkingError extends Error {
+  override readonly name = 'ChunkingError';
   constructor(
     readonly code: ChunkingErrorCode,
     message: string,
   ) {
     super(message);
-    this.name = 'ChunkingError';
   }
 }
 
+/** Target passage size in estimated tokens (`PASSAGE_TOKENS` defaults to this too). */
+export const DEFAULT_PASSAGE_TOKENS = 400;
+
 export type ChunkOptions = {
-  /** Target passage size in estimated tokens (default 400). */
+  /** Target passage size in estimated tokens (default `DEFAULT_PASSAGE_TOKENS`). */
   passageTokens?: number;
   /** Fail with `too_many_passages` above this count (default: unlimited). */
   maxPassages?: number;
@@ -314,7 +317,7 @@ function blockSentences(masked: string, block: Block, maxChars: number): Span[] 
  * @throws ChunkingError `empty_after_parse` when no sentence survives; `too_many_passages` above `maxPassages`.
  */
 export function chunkDocument(content: string, format: DocumentFormat, opts: ChunkOptions = {}): Passage[] {
-  const passageTokens = opts.passageTokens ?? 400;
+  const passageTokens = opts.passageTokens ?? DEFAULT_PASSAGE_TOKENS;
   const maxChars = passageTokens * CHARS_PER_TOKEN;
   const { blocks, masked } = format === 'markdown' ? scanMarkdown(content) : { blocks: scanText(content), masked: content };
 

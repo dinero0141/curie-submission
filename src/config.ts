@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_PASSAGE_TOKENS } from './domain/chunking.js';
 
 /** Treat empty strings (e.g. `FOO=` in .env) as "not set" so defaults apply. */
 const emptyToUndefined = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
@@ -9,6 +10,9 @@ const positiveInt = (def: number) =>
 /** Local (host) database URL; also used by `pnpm migrate` when `DATABASE_URL` is unset. */
 export const DEFAULT_DATABASE_URL = 'postgres://curie:curie@localhost:54329/curie';
 
+/** pino levels (`silent` turns logging off). */
+export const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
+
 const ConfigSchema = z
   .object({
     DATABASE_URL: z.preprocess(emptyToUndefined, z.string().url().default(DEFAULT_DATABASE_URL)),
@@ -18,10 +22,11 @@ const ConfigSchema = z
     ANTHROPIC_MODEL: z.preprocess(emptyToUndefined, z.string().default('claude-sonnet-5-5')),
     MAX_DOCUMENT_BYTES: positiveInt(5 * 1024 * 1024),
     FULL_CONTEXT_TOKENS: positiveInt(60_000),
-    PASSAGE_TOKENS: positiveInt(400),
+    PASSAGE_TOKENS: positiveInt(DEFAULT_PASSAGE_TOKENS),
     MAX_ANSWER_TOKENS: positiveInt(1024),
     MODEL_TIMEOUT_MS: positiveInt(90_000),
     PORT: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(65535).default(3000)),
+    LOG_LEVEL: z.preprocess(emptyToUndefined, z.enum(LOG_LEVELS).default('info')),
   })
   .superRefine((cfg, ctx) => {
     if (cfg.MODEL_PROVIDER === 'anthropic' && !cfg.ANTHROPIC_API_KEY) {
@@ -47,12 +52,13 @@ export type Config = {
   maxAnswerTokens: number;
   modelTimeoutMs: number;
   port: number;
+  logLevel: (typeof LOG_LEVELS)[number];
 };
 
 export class ConfigError extends Error {
+  override readonly name = 'ConfigError';
   constructor(readonly issues: string[]) {
     super(`Invalid configuration:\n${issues.map((i) => `  - ${i}`).join('\n')}`);
-    this.name = 'ConfigError';
   }
 }
 
@@ -75,5 +81,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxAnswerTokens: e.MAX_ANSWER_TOKENS,
     modelTimeoutMs: e.MODEL_TIMEOUT_MS,
     port: e.PORT,
+    logLevel: e.LOG_LEVEL,
   };
 }

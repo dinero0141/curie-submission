@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { Worker } from 'bullmq';
 import type { FastifyInstance } from 'fastify';
 import type { Redis } from 'ioredis';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { getDocumentSummary, insertDocument, type DocumentSummary } from '../../src/db/documents.js';
 import { listPassages } from '../../src/db/passages.js';
@@ -12,6 +12,7 @@ import { buildApp } from '../../src/http/app.js';
 import {
   createPrepareDocumentProcessor,
   createPrepareDocumentWorker,
+  PREPARATION_ERROR_MESSAGE,
   type PrepareDocumentResult,
 } from '../../src/jobs/prepareDocument.js';
 import { closeQueues, createQueues, createRedisConnection, type Queues } from '../../src/jobs/queues.js';
@@ -30,6 +31,8 @@ let app: FastifyInstance;
 let chunk: typeof chunkDocument = chunkDocument;
 /** `attemptsMade` observed by the processor on each run, keyed by document id. */
 const attemptsSeen = new Map<string, number[]>();
+/** The worker's logger, to check that internal error text is logged rather than stored. */
+const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
 beforeAll(async () => {
   const config = loadConfig({
@@ -51,6 +54,7 @@ beforeAll(async () => {
       passageTokens: config.passageTokens,
       maxPassages: 50,
       chunk: (content, format, opts) => chunk(content, format, opts),
+      log,
     },
     { prefix: env.bullPrefix },
   );
@@ -211,8 +215,13 @@ describe('POST /documents → prepare-document', () => {
     const res = await upload({ title: 'Always failing', format: 'text', content: 'Some text.' });
     const id = res.json().id;
     const doc = await waitForTerminal(id);
-    expect(doc).toMatchObject({ status: 'failed', failureCode: 'preparation_error' });
-    expect(doc.failureMessage).toContain('database hiccup');
+    // Internal error text is only logged; the row (and so the API) carries a generic message.
+    expect(doc).toMatchObject({ status: 'failed', failureCode: 'preparation_error', failureMessage: PREPARATION_ERROR_MESSAGE });
+    expect(doc.failureMessage).not.toContain('database hiccup');
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ documentId: id, err: expect.objectContaining({ message: 'database hiccup' }) }),
+      expect.any(String),
+    );
     // Both attempts ran the processor and the job ended `failed`. Had the first (non-final) attempt
     // written `failed`, the second would have skipped the terminal row and the job would be `completed`.
     const job = await waitForJobState(id, 'failed');

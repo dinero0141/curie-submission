@@ -1,14 +1,12 @@
 import type { Passage, Span } from '../domain/chunking.js';
 import type { Queryable } from './pool.js';
 
-/** What chunking produces (the domain `Passage`), before it has a row id. */
-export type NewPassage = Passage;
-
-export type PassageRow = NewPassage & { id: string; documentId: string };
+/** A stored passage: what chunking produces (the domain `Passage`) plus its row id. */
+export type PassageRow = Passage & { id: string; documentId: string };
 
 const COLUMNS = `id, document_id, ordinal, start_offset, end_offset, heading, sentences, text, token_estimate`;
 
-export function toPassageRow(r: Record<string, unknown>): PassageRow {
+function toPassageRow(r: Record<string, unknown>): PassageRow {
   return {
     id: r.id as string,
     documentId: r.document_id as string,
@@ -29,7 +27,7 @@ const INSERT_BATCH = 500;
  * Replace all passages of a document (delete + insert), so a re-run of preparation is idempotent.
  * Call inside a transaction.
  */
-export async function replacePassages(q: Queryable, documentId: string, passages: NewPassage[]): Promise<void> {
+export async function replacePassages(q: Queryable, documentId: string, passages: Passage[]): Promise<void> {
   await q.query('DELETE FROM passages WHERE document_id = $1', [documentId]);
   for (let i = 0; i < passages.length; i += INSERT_BATCH) {
     const batch = passages.slice(i, i + INSERT_BATCH);

@@ -14,7 +14,7 @@ export type AppDeps = {
   queues: Pick<Queues, 'prepareDocument' | 'generateAnswer'>;
   /** Fastify logger option; tests pass `false`. */
   logger?: FastifyServerOptions['logger'];
-  /** Max wait for an enqueue on the request path before deferring to the reconciler (default 2 s). */
+  /** Max wait for an enqueue on the request path before deferring to the reconciler (default `ENQUEUE_TIMEOUT_MS`, 2 s). */
   enqueueTimeoutMs?: number;
 };
 

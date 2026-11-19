@@ -10,10 +10,10 @@ import { getConversation, insertConversation, lockConversation, touchConversatio
 import { getDocumentSummary } from '../../db/documents.js';
 import { insertMessage, listMessages, ONE_INFLIGHT_ANSWER } from '../../db/messages.js';
 import { isUniqueViolation, withTx, type Queryable } from '../../db/pool.js';
-import { enqueueGenerateAnswer, enqueueOrDefer } from '../../jobs/queues.js';
+import { ENQUEUE_TIMEOUT_MS, enqueueGenerateAnswer, enqueueOrDefer } from '../../jobs/queues.js';
 import type { AppDeps } from '../app.js';
 import { HttpError, notFound } from '../errors.js';
-import { invalidRequest, isStorableText, parseId } from './documents.js';
+import { invalidRequest, isStorableText, parseId } from '../validation.js';
 import { messageJson } from './messages.js';
 
 export const MAX_QUESTION_LENGTH = 2000;
@@ -57,7 +57,7 @@ async function insertTurn(tx: Queryable, conversationId: string, question: strin
 async function enqueue(deps: AppDeps, log: FastifyBaseLogger, messageId: string): Promise<void> {
   await enqueueOrDefer(
     enqueueGenerateAnswer(deps.queues.generateAnswer, messageId),
-    deps.enqueueTimeoutMs ?? 2_000,
+    deps.enqueueTimeoutMs ?? ENQUEUE_TIMEOUT_MS,
     log,
     { messageId },
     'generate-answer',

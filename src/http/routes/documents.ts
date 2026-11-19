@@ -1,7 +1,7 @@
 /**
  * Document routes. Upload only stores the row and enqueues preparation (202); chunking runs in the worker.
  */
-import type { FastifyInstance } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
   getDocument,
@@ -10,21 +10,12 @@ import {
   listDocuments,
   type DocumentSummary,
 } from '../../db/documents.js';
-import { enqueueOrDefer, enqueuePrepareDocument } from '../../jobs/queues.js';
+import { ENQUEUE_TIMEOUT_MS, enqueueOrDefer, enqueuePrepareDocument } from '../../jobs/queues.js';
 import type { AppDeps } from '../app.js';
 import { HttpError, notFound } from '../errors.js';
+import { hasLoneSurrogate, hasNul, invalidRequest, isStorableText, parseId } from '../validation.js';
 
 export const MAX_TITLE_LENGTH = 300;
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** A UTF-16 surrogate without its pair: cannot be stored as UTF-8, so offsets would drift. */
-const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
-
-/**
- * True when Postgres can store `s` unchanged: no NUL (rejected by Postgres, which would be a 500) and no
- * unpaired surrogate (silently rewritten to U+FFFD). Applied to every stored text field.
- */
-export const isStorableText = (s: string) => !s.includes('\u0000') && !LONE_SURROGATE_RE.test(s);
 
 const CreateDocumentBody = z.object({
   title: z
@@ -54,21 +45,15 @@ export function documentJson(d: DocumentSummary) {
   };
 }
 
-/** Unknown or malformed ids are both a 404 (a malformed uuid would otherwise be a Postgres 22P02 → 500). */
-export function parseId(id: string, what: string): string {
-  if (!UUID_RE.test(id)) throw notFound(what);
-  return id;
-}
-
-/** First zod issue as a 400; field schemas carry their own messages (which name the field). */
-export function invalidRequest(err: z.ZodError): HttpError {
-  const first = err.issues[0];
-  const message = !first
-    ? 'invalid request body'
-    : first.path.length === 0
-      ? 'request body must be a JSON object'
-      : first.message;
-  return new HttpError(400, 'invalid_request', message);
+/** Bounded: a slow or failed enqueue still answers 202; the reconciler enqueues stale pending documents. */
+async function enqueue(deps: AppDeps, log: FastifyBaseLogger, documentId: string): Promise<void> {
+  await enqueueOrDefer(
+    enqueuePrepareDocument(deps.queues.prepareDocument, documentId),
+    deps.enqueueTimeoutMs ?? ENQUEUE_TIMEOUT_MS,
+    log,
+    { documentId },
+    'prepare-document',
+  );
 }
 
 export function registerDocumentRoutes(app: FastifyInstance, deps: AppDeps): void {
@@ -86,21 +71,15 @@ export function registerDocumentRoutes(app: FastifyInstance, deps: AppDeps): voi
       );
     }
     if (content.trim() === '') throw new HttpError(400, 'empty_document', 'content must not be empty');
-    if (content.includes('\u0000')) {
+    if (hasNul(content)) {
       throw new HttpError(400, 'invalid_content', 'content must not contain NUL characters');
     }
-    if (LONE_SURROGATE_RE.test(content)) {
+    if (hasLoneSurrogate(content)) {
       throw new HttpError(400, 'invalid_content', 'content contains an unpaired UTF-16 surrogate');
     }
 
     const doc = await insertDocument(deps.pool, { title, format, content });
-    await enqueueOrDefer(
-      enqueuePrepareDocument(deps.queues.prepareDocument, doc.id),
-      deps.enqueueTimeoutMs ?? 2_000,
-      req.log,
-      { documentId: doc.id },
-      'prepare-document',
-    );
+    await enqueue(deps, req.log, doc.id);
     return reply.code(202).send({ id: doc.id, status: doc.status });
   });
 

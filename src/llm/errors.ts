@@ -1,6 +1,6 @@
 /**
- * Model failure classification. The processor (Task 9) uses `retryable` to decide between a BullMQ retry
- * and a terminal `failed` row, and stores `code` on the message.
+ * Model failure classification. The generate-answer processor (`src/jobs/generateAnswer.ts`) uses `retryable`
+ * to decide between a BullMQ retry and a terminal `failed` row, and stores `code` on the message.
  *
  * Classes come from the installed `@anthropic-ai/sdk` (1.10.0), checked most specific first. Status → class
  * mapping is the SDK's own (`APIError.generate`); retryable vs permanent follows the claude-api skill's error
@@ -60,6 +60,10 @@ const result = (code: ModelErrorCode, retryable: boolean, err: unknown): Classif
   message: short(err instanceof Error ? err.message : String(err)),
 });
 
+/** An `invalid_request_error` (HTTP 400 or mid-stream): over-long prompt, or a request we built wrong. */
+const invalidRequest = (err: Error): ClassifiedError =>
+  result(PROMPT_TOO_LONG.test(err.message) ? 'context_too_large' : 'model_config_error', false, err);
+
 export function classifyError(err: unknown): ClassifiedError {
   if (err instanceof ModelRefusalError) return result('model_refused', false, err);
   if (err instanceof ModelTimeoutError) return result('model_unavailable', true, err); // AnthropicModel's deadline
@@ -72,9 +76,7 @@ export function classifyError(err: unknown): ClassifiedError {
     const status = err.status;
     if (status === undefined) {
       // `event: error` inside an SSE stream: the SDK builds an APIError from the body, with `type` set.
-      if (err.type === 'invalid_request_error') {
-        return result(PROMPT_TOO_LONG.test(err.message) ? 'context_too_large' : 'model_config_error', false, err);
-      }
+      if (err.type === 'invalid_request_error') return invalidRequest(err);
       if (err.type && !RETRYABLE_TYPES.has(err.type)) return result('model_config_error', false, err);
       return result('model_unavailable', true, err);
     }
@@ -83,7 +85,7 @@ export function classifyError(err: unknown): ClassifiedError {
       return result('model_unavailable', true, err); // 500, 503, 504, 529; 408/409 are retried by the SDK by default too
     }
     if (status === 413) return result('context_too_large', false, err);
-    if (status === 400) return result(PROMPT_TOO_LONG.test(err.message) ? 'context_too_large' : 'model_config_error', false, err);
+    if (status === 400) return invalidRequest(err);
     return result('model_config_error', false, err); // 401, 402, 403, 404, 422, ...
   }
 

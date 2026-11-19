@@ -277,8 +277,8 @@ Document `failureCode`:
 |---|---|---|
 | `empty_after_parse` | No text left after removing Markdown syntax (headings, fences only) | Fix the content and upload again |
 | `too_many_passages` | More than 20,000 passages (pathological input) | Upload a smaller or less fragmented document |
-| `preparation_error` | Unexpected error on all 3 attempts | Upload again |
-| `stalled` | The background job was lost or failed outside the processor | Upload again |
+| `preparation_error` | Unexpected error on all 3 attempts; `failureMessage` is generic (details are only in the worker log) | Upload again |
+| `stalled` | The background job was lost or failed outside the processor; `failureMessage` is generic (the job's error is only in the worker log) | Upload again |
 
 Answer `error.code`:
 
@@ -294,4 +294,5 @@ Answer `error.code`:
 | `stalled` | Job lost or failed outside the processor | Ask again |
 
 The error `message` of a failed answer may contain provider error text (never internal details: `internal_error`
-always carries a generic message); show `code`-based copy to end users.
+and `stalled` always carry a generic message, as do `preparation_error` and `stalled` on documents); show
+`code`-based copy to end users.

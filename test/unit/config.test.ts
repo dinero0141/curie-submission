@@ -15,6 +15,7 @@ describe('loadConfig', () => {
       maxAnswerTokens: 1024,
       modelTimeoutMs: 90_000,
       port: 3000,
+      logLevel: 'info',
     });
     expect(cfg.databaseUrl).toMatch(/^postgres:\/\//);
     expect(cfg.redisUrl).toMatch(/^redis:\/\//);
@@ -31,6 +32,11 @@ describe('loadConfig', () => {
     expect(cfg.modelTimeoutMs).toBe(5000);
   });
 
+  it('accepts a pino log level', () => {
+    expect(loadConfig({ ...fake, LOG_LEVEL: 'debug' }).logLevel).toBe('debug');
+    expect(loadConfig({ ...fake, LOG_LEVEL: '' }).logLevel).toBe('info');
+  });
+
   it('treats empty strings as unset', () => {
     const cfg = loadConfig({ ...fake, PORT: '', ANTHROPIC_MODEL: '' });
     expect(cfg.port).toBe(3000);
@@ -45,6 +51,7 @@ describe('loadConfig', () => {
     ['MAX_DOCUMENT_BYTES', '1.5'],
     ['DATABASE_URL', 'not a url'],
     ['MODEL_PROVIDER', 'openai'],
+    ['LOG_LEVEL', 'verbose'],
   ])('rejects invalid %s=%s', (key, value) => {
     expect(() => loadConfig({ ...fake, [key]: value })).toThrow(ConfigError);
     try {
