@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type pg from 'pg';
+import { loadEnvFile } from '../loadEnv.js';
 import { createPool } from './pool.js';
 
 /** `migrations/` at the repo root; resolves the same from `src/db` (tsx) and `dist/db` (build). */
@@ -36,6 +37,7 @@ export async function migrate(pool: pg.Pool, dir: string = MIGRATIONS_DIR): Prom
 const DEFAULT_DATABASE_URL = 'postgres://curie:curie@localhost:54329/curie';
 
 async function main(): Promise<void> {
+  loadEnvFile();
   // Only DATABASE_URL is needed here; full config validation (API key etc.) is not.
   const url = process.env.DATABASE_URL?.trim() || DEFAULT_DATABASE_URL;
   const pool = createPool(url);

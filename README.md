@@ -12,6 +12,8 @@ cp .env.example .env          # then set ANTHROPIC_API_KEY, or MODEL_PROVIDER=fa
 docker compose up -d postgres redis
 ```
 
+Local scripts (`pnpm migrate`, `pnpm spike`, `pnpm eval`, and the api/worker entrypoints) auto-load the dotenv file at the repo root if present; variables already set in your shell win. Tests never read it.
+
 ## Tests
 
 ```sh

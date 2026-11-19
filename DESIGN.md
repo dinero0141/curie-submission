@@ -5,6 +5,7 @@
 ## Assumptions
 
 ## Architecture
+- Configuration comes only from the process environment (`loadConfig(env)` is pure and unit-tested). For local runs, entrypoints and scripts first call `loadEnvFile()` (`src/loadEnv.ts`), which uses Node's built-in `process.loadEnvFile` when the repo-root dotenv file exists: no `dotenv` dependency, no `--env-file` flags in package scripts, shell variables always win (guarded by a snapshot, not only Node's default), and a missing or unreadable file is not an error. Tests never call it, so a developer's local file cannot change test results.
 
 ## Data model
 - Four tables (`documents`, `passages`, `conversations`, `messages`) in one idempotent SQL file (`migrations/001_init.sql`, all `IF NOT EXISTS`). `migrate.ts` re-executes every file under a Postgres advisory lock, so there is no migrations table to drift and concurrent runs (compose `migrate`, test runs) serialize. Trade-off: later schema *changes* need `ALTER ... IF NOT EXISTS`-style statements; fine for this scope.

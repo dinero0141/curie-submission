@@ -7,6 +7,7 @@ Rules given to the coding agents that implement this repo. The plan lives in `do
 - Fastify (HTTP), BullMQ + ioredis (jobs), PostgreSQL via `pg` with raw SQL (no ORM), zod (config/validation), pino (logs), `@anthropic-ai/sdk` (model), vitest (tests).
 - TypeScript 7 (native `tsc`) is used only for `typecheck`/`build`; tsx and vitest transpile on their own.
 - Dependency build scripts are allow-listed in `pnpm-workspace.yaml` (`allowBuilds`: esbuild, msgpackr-extract); add new ones there deliberately.
+- Local scripts auto-load the repo-root dotenv file if present: entrypoints and `scripts/*.ts` (and the `src/db/migrate.ts` CLI) call `loadEnvFile()` from `src/loadEnv.ts` (Node's built-in `process.loadEnvFile`, never overrides variables already set, never throws). Never import it from `src/config.ts` or from tests — tests stay hermetic. Package scripts carry no env-file flags.
 - Local services: `docker compose up -d postgres redis` (host ports 54329 / 63799). The `curie_test` database is created on first volume init by `docker/postgres-init.sql`.
 
 ## Invariants
