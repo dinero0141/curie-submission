@@ -1,8 +1,9 @@
 // GeminiModel through a stubbed `fetch` (no network, no API key). Response bodies are written from the ASSUMED
 // generateContent shapes in docs/notes/gemini-notes.md, NOT recorded from the live API. What this proves: the
 // request body we send, the mapping of the structured answer into the RawAnswer shape that resolveCitations
-// verifies unchanged, and error/timeout classification. Whether the API accepts and answers this request stays
-// unverified until `pnpm smoke` runs with a real key.
+// verifies unchanged, and error/timeout classification. The live API accepted and answered this request once, in
+// the 2026-11-19 smoke run on gemini-3.5-flash-lite (which facts that confirmed: docs/notes/gemini-notes.md); the
+// failure bodies used here (429, blocks, MAX_TOKENS, ...) remain assumed.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { chunkDocument } from '../../src/domain/chunking.js';

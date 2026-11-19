@@ -130,3 +130,58 @@ worktree's postgres/redis started again.
 
 Not covered by this check: the `anthropic` provider (no API key, keyless run) and the README's
 `cp .env.example .env` step (file not committed yet).
+
+## 2026-11-19 — live Gemini smoke run, `gemini-3.5-flash-lite`
+
+**Captured live** (the first real model calls of this project). The human put a free Google AI Studio key in the
+repo-root dotenv file (`MODEL_PROVIDER=gemini`); the orchestrator ran `pnpm smoke` (direct model calls along the
+production path, no HTTP stack, no database). Facts this confirmed: [gemini-notes.md](gemini-notes.md).
+
+Before the passing run: `pnpm smoke` with the then-default `gemini-3.8-flash` exited 2 twice, on the first question:
+
+```
+smoke: [keyword] model_unavailable (retryable: true): Gemini API 503 UNAVAILABLE: This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.
+```
+
+The first `GEMINI_MODEL=gemini-3.5-flash-lite pnpm smoke` hit the same 503 on the first question (exit 2). A plain
+one-word probe (`generateContent`, no `generationConfig`) gave `gemini-3.8-flash` 503 (body
+`{"error": {"code": 503, "message": "…high demand…", "status": "UNAVAILABLE"}}`), `gemini-3.5-flash-lite` 200
+(`candidates[0].content.parts[0]` = `{"text": "ok", "thoughtSignature": "…"}`), and `gemini-2.5-flash-lite` 404
+("…is no longer available to new users. Please update your code to use models/gemini-3.5-flash-lite…").
+
+Second `GEMINI_MODEL=gemini-3.5-flash-lite pnpm smoke` → exit 0 (usage lines trimmed to the token totals; each also
+had `promptTokensDetails` and `"serviceTier":"standard"`):
+
+```
+smoke: provider gemini, model gemini-3.5-flash-lite, 5 passages, 3 questions
+
+PASS [keyword] How many of the 40 questions did keyword search answer?
+  outcome: answerable; verified citations: 1; dropped: none
+  stopReason: end_turn; model: gemini-3.5-flash-lite; 0.9 s; usage: {"promptTokenCount":874,"candidatesTokenCount":114,"totalTokenCount":988, …}
+  answer: Keyword search returned a relevant passage for 28 of the 40 questions.
+  quote [711, 781): "Keyword search returned a relevant passage for 28 of the 40 questions."
+  check: quote contains "28 of the 40"
+
+PASS [budget] What was the pilot's budget?
+  outcome: not_in_document; verified citations: 0; dropped: none
+  stopReason: end_turn; model: gemini-3.5-flash-lite; 0.9 s; usage: {"promptTokenCount":869,"candidatesTokenCount":38,"totalTokenCount":907, …}
+  answer: NOT_IN_DOCUMENT: The provided passages do not contain information about the pilot's budget.
+  check: not found, as expected
+
+PASS [hybrid-followup] And the hybrid prototype?
+  outcome: answerable; verified citations: 1; dropped: none
+  stopReason: end_turn; model: gemini-3.5-flash-lite; 1.1 s; usage: {"promptTokenCount":898,"candidatesTokenCount":116,"totalTokenCount":1014, …}
+  answer: The hybrid prototype returned a relevant passage for 34 of the 40 questions.
+  quote [783, 859): "The hybrid prototype returned a relevant passage for 34 of the 40 questions."
+  check: quote contains "34 of the 40"
+
+3/3 passed
+```
+
+Offset check: `samples/harbor-archive.md` (1,762 UTF-16 code units) sliced in JS at `[711, 781)` and `[783, 859)`
+equals the two quotes exactly (checked by the orchestrator after the run, and again with `node` when this section was
+written).
+
+Not covered by this run: the HTTP API, BullMQ worker and compose stack with Gemini; the eval; `thinkingLevel` (never
+sent to a model that answered); 429, `MAX_TOKENS`, blocking finish reasons, an over-long prompt. The Claude path has
+still never been called live.

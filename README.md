@@ -11,8 +11,9 @@ text while the answer is generated.
 - Recording: **pending** (link to be added before submission; tracked in
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining))
 - Status: complete and tested end to end with a fake model, but **built without an Anthropic API key**: no real
-  Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible;
-  it has not been run against the live API yet either (`pnpm smoke` is the check). See
+  Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible:
+  `pnpm smoke` passed 3/3 against the live API on `gemini-3.5-flash-lite` (direct model calls; the HTTP/worker stack
+  and the eval have not run live yet). See
   [Verification status](#verification-status) and
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
 - Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–18:20 by commit times; the task
@@ -58,7 +59,7 @@ with:
 ```sh
 MODEL_PROVIDER=gemini
 GEMINI_API_KEY=
-GEMINI_MODEL=gemini-3.8-flash
+GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 
 This starts Postgres 16, Redis 7, a one-shot `migrate`, the API on http://localhost:3000 and the worker. Host ports:
@@ -74,7 +75,7 @@ Stop everything with `docker compose down` (add `-v` to drop the database volume
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_PROVIDER=anthropic` (the app refuses to start without it) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | The request shape (Citations, adaptive thinking, `output_config.effort`) is assumed for the default model. Another model must accept all three; unverified (keyless build) |
 | `GEMINI_API_KEY` | — | Required when `MODEL_PROVIDER=gemini`. Free tier: Google may use prompts to improve its products, so send only documents you may share ([gemini-notes](docs/notes/gemini-notes.md), fact 23) |
-| `GEMINI_MODEL` | `gemini-3.8-flash` | Stable free-tier Flash model (a `models/` prefix is stripped); `thinkingLevel: low` is sent to Gemini 3+/4 ids only, not to Flash-Lite ids (their default, `minimal`, is lower). Alternatives: `gemini-3.5-flash-lite`, `gemini-4-hydrogen`. Unverified (no live call yet) |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Stable free-tier model (a `models/` prefix is stripped), and the only one that answered live: on 2026-11-19 `gemini-3.8-flash` returned 503 UNAVAILABLE "high demand" on every try, and `gemini-2.5-flash-lite` is 404 for new users. `thinkingLevel: low` is sent to Gemini 3+/4 ids only, not to Flash-Lite ids (their default, `minimal`, is lower). Alternatives: `gemini-3.8-flash`, `gemini-4-hydrogen` (not yet answered live) |
 | `MAX_ANSWER_TOKENS` | `1024` | Answer budget; Claude adds 4096 tokens of thinking headroom, Gemini adds 2048 (JSON and copied quotes) + 4096 (thinking) |
 | `MODEL_TIMEOUT_MS` | `90000` | Deadline for one answer; a timeout is retried |
 | `FULL_CONTEXT_TOKENS` | `60000` | Documents up to this estimated size are sent whole |
@@ -220,7 +221,9 @@ prototype?" with the keyword turn as history (`followUpOf: 'keyword'`; the docum
 answer did not complete), expecting "34 of the 40". Per question it prints the outcome, the verified
 quotes with offsets, drop reasons, stop reason, model and usage; it exits 1 if an expectation fails and 2 on a
 configuration, HTTP or network error. It refuses `MODEL_PROVIDER=fake` and never prints the key. The checks
-(`scripts/smoke-check.ts`) are unit-tested. **Not run yet** (no key in this build).
+(`scripts/smoke-check.ts`) are unit-tested. **Run live with Gemini on 2026-11-19: 3/3 passed on
+`gemini-3.5-flash-lite`** (output in [manual-checks](docs/notes/manual-checks.md#2026-11-19--live-gemini-smoke-run-gemini-35-flash-lite));
+`gemini-3.8-flash` got 503 "high demand" on the first question every time. Never run with Claude (no key).
 
 ## Eval
 
@@ -238,8 +241,8 @@ slicing the stored content to its quote. It prints a table and exits 1 if any an
 fails: API down, document failed, timeout). The assertions (`scripts/eval-check.ts`) are unit-tested, and the
 harness runs in `pnpm test` against a listening app with the fake model (`test/integration/eval-harness.test.ts`).
 
-**Results: not yet run (keyless).** No API key was available for this build, so the eval has never run against real
-Claude. It was run once against the compose stack with `MODEL_PROVIDER=fake` to check the harness only: it ran end
+**Results: not yet run.** No Anthropic key was available for this build, so the eval has never run against real
+Claude, and it has not been run against Gemini yet (only `pnpm smoke` has). It was run once against the compose stack with `MODEL_PROVIDER=fake` to check the harness only: it ran end
 to end and reported 0/7, as expected, because the fake model cites the document's first sentence for every question
 (exit code 1; an unreachable `EVAL_BASE_URL` gives exit code 2). The sample document is sent whole (`full` mode), so
 the eval does not cover `ranked` retrieval.
@@ -249,11 +252,15 @@ the eval does not cover `ranked` retrieval.
 This build had **no Anthropic API key** (a deliberate decision to continue keyless). So:
 
 Verified:
-- `pnpm typecheck` and `pnpm test`: 335/335 passing, against `FakeModel` or a stubbed `fetch` (no model API is ever
+- `pnpm typecheck` and `pnpm test`: 363/363 passing (21 files: 259 unit, 104 integration), against `FakeModel` or a stubbed `fetch` (no model API is ever
   called), with real Postgres, Redis and BullMQ workers in the integration tests.
 - The example flow above, over HTTP against the compose stack with `MODEL_PROVIDER=fake`: upload → ready → ask →
   poll → follow-up → offsets slice the stored content; plus 400/404/409/415 responses and a failed document
   (`empty_after_parse`).
+- **Live Gemini, `pnpm smoke` on 2026-11-19: 3/3 passed on `gemini-3.5-flash-lite`**: a verified quote containing
+  "28 of the 40", the not-found budget question, and the follow-up (with history) verified for "34 of the 40"; both
+  quotes' offsets slice the sample to the quote exactly, and no citation was dropped
+  ([output](docs/notes/manual-checks.md#2026-11-19--live-gemini-smoke-run-gemini-35-flash-lite)).
 
 Not verified:
 - **No real Claude call was ever made.** `AnthropicModel` typechecks against `@anthropic-ai/sdk` 1.10.0 and its
@@ -271,15 +278,14 @@ Not verified:
   paper (the sample document is small enough to be sent whole).
 - `docker compose up` with `MODEL_PROVIDER=anthropic`, a `.env` overriding the `fake` default, load, and many
   concurrent workers/pollers.
-- **No real Gemini call was made either.** `GeminiModel` is unit-tested through a stubbed `fetch` (exact request
-  body, response mapping, every error class) and runs through the real generate-answer processor in an integration
-  test, but the request and response shapes are assumed from Google's docs
-  ([docs/notes/gemini-notes.md](docs/notes/gemini-notes.md) marks each fact UNVERIFIED; the structured-output field
-  spelling is the likeliest to differ).
+- **Gemini beyond one smoke run.** The smoke run called the model directly, so the HTTP API, BullMQ worker and
+  compose stack have not run with Gemini, and the eval has not run. Not observed: `thinkingLevel` on
+  `gemini-3.8-flash` (it only ever answered 503), 429 bodies (`RetryInfo`/`QuotaFailure`), `MAX_TOKENS`,
+  safety/recitation blocks, an over-long prompt. Which API facts the run confirmed and which stay UNVERIFIED:
+  [docs/notes/gemini-notes.md](docs/notes/gemini-notes.md).
 
-To verify with a free Gemini key: follow
-[docs/notes/gemini-notes.md § How to verify](docs/notes/gemini-notes.md#how-to-verify) (`pnpm smoke`, then the eval
-against the compose stack). To verify with an Anthropic key: set `MODEL_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in
+Next with the Gemini key: the eval against the compose stack
+([docs/notes/gemini-notes.md § How to verify](docs/notes/gemini-notes.md#how-to-verify), step 5). To verify with an Anthropic key: set `MODEL_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in
 `.env`, run `pnpm spike` and compare
 `docs/notes/spike-output/` with the facts in `docs/notes/citations-spike.md`, then run `pnpm eval` against
 `docker compose up --build` and record its table under [Eval](#eval). This is the first item of the remaining work;

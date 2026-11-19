@@ -12,10 +12,12 @@ const positiveInt = (def: number) =>
 export const DEFAULT_DATABASE_URL = 'postgres://curie:curie@localhost:54329/curie';
 
 /**
- * Default Gemini model: stable, free of charge on the Free Tier, structured output and thinking levels supported
- * (docs/notes/gemini-notes.md, UNVERIFIED). Not gemini-2.5-*: deprecated, auto-routed to 3.x from 2026-12-01.
+ * Default Gemini model: stable, free of charge on the Free Tier, structured output supported, and the only model that
+ * answered the first live smoke run (2026-11-19: gemini-3.8-flash returned 503 UNAVAILABLE "high demand" on every
+ * try; it stays selectable via `GEMINI_MODEL`). Flash-Lite gets no `thinkingConfig` (`thinkingConfigFor`).
+ * Not gemini-2.5-*: deprecated, and gemini-2.5-flash-lite answers 404 to new users (docs/notes/gemini-notes.md).
  */
-export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 
 /** `MODEL_PROVIDER` values. */
 export const MODEL_PROVIDERS = ['anthropic', 'gemini', 'fake'] as const;

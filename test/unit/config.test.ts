@@ -92,13 +92,14 @@ describe('loadConfig', () => {
 
   it('accepts the gemini provider with a key, defaults the model, allows an override', () => {
     const cfg = loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test' });
-    expect(cfg).toMatchObject({ modelProvider: 'gemini', geminiApiKey: 'g-test', geminiModel: 'gemini-3.8-flash' });
-    expect(DEFAULT_GEMINI_MODEL).toBe('gemini-3.8-flash');
+    // The only model that answered the first live smoke run (gemini-3.8-flash was 503 "high demand" throughout).
+    expect(cfg).toMatchObject({ modelProvider: 'gemini', geminiApiKey: 'g-test', geminiModel: 'gemini-3.5-flash-lite' });
+    expect(DEFAULT_GEMINI_MODEL).toBe('gemini-3.5-flash-lite');
     expect(cfg.anthropicApiKey).toBeUndefined();
-    expect(loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test', GEMINI_MODEL: 'gemini-3.5-flash-lite' }).geminiModel).toBe(
-      'gemini-3.5-flash-lite',
+    expect(loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test', GEMINI_MODEL: 'gemini-3.8-flash' }).geminiModel).toBe(
+      'gemini-3.8-flash',
     );
-    expect(loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test', GEMINI_MODEL: '' }).geminiModel).toBe('gemini-3.8-flash');
+    expect(loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test', GEMINI_MODEL: '' }).geminiModel).toBe('gemini-3.5-flash-lite');
   });
 
   it('stores a models/<id> GEMINI_MODEL (the resource name models.list prints) as the bare id', () => {

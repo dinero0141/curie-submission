@@ -16,8 +16,9 @@
  * Trade-off: JSON cannot be shown progressively, so `onDelta` is never called; the row stays `streaming` with
  * empty content until the answer completes.
  *
- * Every Gemini API fact relied on here is in docs/notes/gemini-notes.md, all UNVERIFIED until the first live run
- * (`pnpm smoke`): this was written without a Gemini API key.
+ * Every Gemini API fact relied on here is in docs/notes/gemini-notes.md. This was written without a Gemini API key;
+ * the first live `pnpm smoke` (2026-11-19, gemini-3.5-flash-lite, 3/3) confirmed the request and success-path
+ * response shapes, and the notes mark which facts remain UNVERIFIED (failure paths, thinkingLevel).
  */
 import { z } from 'zod';
 import { NOT_IN_DOCUMENT_MARKER } from '../domain/citations.js';
@@ -32,7 +33,7 @@ export const GEMINI_API_VERSION = 'v1beta';
  * Output token headroom on top of `MAX_ANSWER_TOKENS` (`maxOutputTokens` is a hard cap):
  * - structured output: JSON syntax plus a copied `quote` for every citation, roughly the answer length again;
  * - thinking: thought tokens count against `maxOutputTokens` (notes fact 11), and thinking cannot be switched
- *   fully off on the default model, only lowered.
+ *   fully off on Gemini 3+ models, only lowered (the default model, gemini-3.5-flash-lite, runs at `minimal`).
  * Unused headroom costs nothing.
  */
 export const STRUCTURED_OUTPUT_HEADROOM_TOKENS = 2048;
