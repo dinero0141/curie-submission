@@ -143,13 +143,29 @@ export async function completeAnswer(q: Queryable, id: string, a: CompletedAnswe
   return (res.rowCount ?? 0) > 0;
 }
 
-/** Terminal failure; frees the conversation for the next question. */
+/**
+ * Terminal failure; frees the conversation for the next question. Partial content is cleared: it is
+ * unverified model text and must not read as an answer.
+ */
 export async function failAnswer(q: Queryable, id: string, code: string, message: string): Promise<boolean> {
   const res = await q.query(
     `UPDATE messages
-     SET status = 'failed', error_code = $2, error_message = $3, updated_at = now()
+     SET status = 'failed', content = '', error_code = $2, error_message = $3, updated_at = now()
      WHERE id = $1 AND status IN ('pending', 'streaming')`,
     [id, code, message],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+/**
+ * A retryable attempt failed and BullMQ will retry: back to `pending` with partial content cleared, so a
+ * polling client sees "waiting" rather than stale text. Only from `streaming`; returns false otherwise.
+ */
+export async function requeueAnswer(q: Queryable, id: string): Promise<boolean> {
+  const res = await q.query(
+    `UPDATE messages SET status = 'pending', content = '', updated_at = now()
+     WHERE id = $1 AND status = 'streaming'`,
+    [id],
   );
   return (res.rowCount ?? 0) > 0;
 }

@@ -1,10 +1,11 @@
-/** Worker entrypoint: BullMQ processors (prepare-document, generate-answer; the reconciler comes later). */
+/** Worker entrypoint: BullMQ processors (prepare-document, generate-answer) and the reconciler. */
 import { pino } from 'pino';
 import { loadConfig } from './config.js';
 import { createPool } from './db/pool.js';
 import { createGenerateAnswerWorker } from './jobs/generateAnswer.js';
 import { createPrepareDocumentWorker } from './jobs/prepareDocument.js';
-import { createRedisConnection } from './jobs/queues.js';
+import { closeQueues, createQueues, createRedisConnection } from './jobs/queues.js';
+import { createReconciler } from './jobs/reconciler.js';
 import { createAnswerModel } from './llm/index.js';
 import { loadEnvFile } from './loadEnv.js';
 
@@ -22,6 +23,11 @@ const workers = [
   createPrepareDocumentWorker(redis, { pool, passageTokens: config.passageTokens, log }),
   createGenerateAnswerWorker(redis, { pool, model, fullContextTokens: config.fullContextTokens, log }),
 ];
+// Producer side for the reconciler (re-enqueues rows whose job is missing).
+const queues = createQueues(redis);
+const reconciler = createReconciler({ pool, queues, log });
+reconciler.start(); // runs now, then every 60 s
+
 log.info(
   { queues: workers.map((w) => w.name), modelProvider: model.provider, ...(model.provider === 'anthropic' ? { model: config.anthropicModel } : {}) },
   'worker started',
@@ -34,8 +40,10 @@ async function shutdown(signal: string): Promise<void> {
   closing = true;
   log.info({ signal }, 'shutting down');
   try {
+    await reconciler.stop();
     // close() waits for active jobs; their processors still write terminal state.
     await Promise.all(workers.map((w) => w.close()));
+    await closeQueues(queues);
     await redis.quit();
     await pool.end();
     process.exit(0);

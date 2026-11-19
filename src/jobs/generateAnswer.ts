@@ -3,8 +3,10 @@
  * throttled partial `content` writes (progressive polling) → `resolveCitations` → one final update.
  *
  * Final-state rule (same as prepare-document): the processor writes the terminal `failed` state itself,
- * immediately for permanent errors (rethrown as `UnrecoverableError`) and on the last attempt for retryable
- * ones. `worker.on('failed')` is only a logging backstop.
+ * immediately for permanent errors (`model_config_error`, `context_too_large`, `model_refused`; rethrown as
+ * `UnrecoverableError`) and on the last attempt for retryable ones (`model_unavailable`). A retryable failure
+ * before the last attempt puts the row back to `pending` for BullMQ's backoff. `max_tokens` is not an error:
+ * the answer completes with `finish_reason = 'max_tokens'`. `worker.on('failed')` is only a logging backstop.
  */
 import { UnrecoverableError, Worker, type Job } from 'bullmq';
 import type { Redis } from 'ioredis';
@@ -16,6 +18,7 @@ import {
   completeAnswer,
   failAnswer,
   listMessages,
+  requeueAnswer,
   startAnswer,
   writePartialContent,
   type MessageRow,
@@ -202,6 +205,12 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
           // Row stays in flight; the reconciler marks it failed once the job is seen as failed.
           deps.log?.error({ messageId, err: writeErr }, 'could not record answer failure');
         }
+      } else {
+        // BullMQ retries after a backoff; meanwhile show `pending` without the failed attempt's partial text.
+        await requeueAnswer(deps.pool, messageId).catch((writeErr: unknown) =>
+          deps.log?.warn({ messageId, err: messageOf(writeErr) }, 'could not reset answer for retry'),
+        );
+        deps.log?.warn({ messageId, attemptsMade: job.attemptsMade, code: classified.code }, 'answer attempt failed; will retry');
       }
       if (permanent) throw new UnrecoverableError(`${classified.code}: ${classified.message}`);
       throw err;
