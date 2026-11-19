@@ -27,7 +27,7 @@ Paths below are relative to `node_modules/@anthropic-ai/sdk/`. Line numbers are 
 | 11 | On `2026-10-21`, a `text` block with non-empty `citations` in a **user** message is a 400, and a `document` block directly in an **assistant** message is a 400. Citations on assistant text blocks are still accepted. We send history as plain text in both roles anyway, which avoids both. | skill `shared/api-version-migration.md` changes 2 and 3 | UNVERIFIED — not observed live |
 | 12 | Citations cannot be combined with structured outputs (`output_config.format` → 400). This is why "not found" is a text marker (`NOT_IN_DOCUMENT:`), not a JSON field. | skill § Citations ("Incompatible with `output_config.format`") | UNVERIFIED — not observed live |
 | 13 | Sonnet 5.5 thinking: omitting `thinking` runs adaptive thinking. `{type:'disabled'}` is a 400. `{type:'between_tools'}` turns thinking off, takes no other field, and works only at effort `high` or below (the default effort is `high`). Thinking tokens count toward `max_tokens`, and with the default `display: 'omitted'` a response can start with a `thinking` block with empty text, so read blocks by `type`, never by position. | skill § Thinking & Effort table; `shared/model-migration.md` § Migrating to Claude Sonnet 5.5 → Breaking change 1; `messages.d.ts:4278-4292` (`ThinkingConfigAdaptive`, `ThinkingConfigBetweenTools`, `ThinkingConfigDisabled`) | UNVERIFIED — not observed live |
-| 14 | Sonnet 5.5 may decline with `stop_reason: 'refusal'` (HTTP 200, `stop_details.category`). The skill recommends the server-side `fallbacks: "default"` beta (`server-side-fallback-2026-07-01`, `client.beta.messages`). Deferred to Task 6. | skill § Claude Fable 5.2 → `refusal` stop reason; `shared/model-migration.md` § Sonnet 5.5 → Safeguards and fallback | UNVERIFIED — not observed live; decision open |
+| 14 | Sonnet 5.5 may decline with `stop_reason: 'refusal'` (HTTP 200, `stop_details.category`). The skill recommends the server-side `fallbacks: "default"` beta (`server-side-fallback-2026-07-01`, `client.beta.messages`). Decided in Task 6: not enabled yet (plain `model_refused`); see DESIGN.md § Model integration. | skill § Claude Fable 5.2 → `refusal` stop reason; `shared/model-migration.md` § Sonnet 5.5 → Safeguards and fallback | UNVERIFIED — not observed live |
 | 15 | Limits on the number of documents per request or blocks per document: **not stated** in the skill or the SDK types. Unknown until the spike runs. | none found | UNKNOWN |
 | 16 | Whether the model actually follows the `NOT_IN_DOCUMENT:` instruction (for example, adds no text before it) is behaviour, not a shape. It cannot be known without live calls. `resolveCitations` also treats "no verified citations" as not answerable, so the marker is not the only safeguard. | none (behaviour) | UNKNOWN |
 
@@ -71,6 +71,10 @@ packagings, so this can be compared.
   turns are plain strings (no citations, no documents). No `temperature`. Leave `thinking` out
   (adaptive) or set `between_tools`. Size `max_tokens` for thinking plus the answer
   (`MAX_ANSWER_TOKENS` = 1024 may be tight with adaptive thinking; decide in Task 6).
+- Task 6 decisions: `thinking` omitted (adaptive) with `output_config.effort: 'medium'`; `max_tokens` =
+  `MAX_ANSWER_TOKENS` + 4096 thinking headroom; no `fallbacks` beta. The request body is pinned by
+  `test/unit/prompt.test.ts`, and `test/unit/anthropic-model.test.ts` drives the real SDK client through a
+  stubbed `fetch` with SSE events written from these assumed shapes. Neither is a live observation.
 
 ## How to verify later
 
