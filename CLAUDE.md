@@ -24,6 +24,23 @@ Rules given to the coding agents that implement this repo. The plan lives in `do
 - Repositories in `src/db/` are plain functions taking a `Queryable`; use `withTx(pool, fn)` for multi-statement writes. Map unique violations with `isUniqueViolation(err, constraintName)`.
 - Integration tests call `useIntegrationEnv()` from `test/integration/setup.ts` (pool on `curie_test`, TRUNCATE per file, unique BullMQ prefix). `globalSetup.ts` fails fast if Postgres/Redis are down and migrates once.
 
+## Patterns (learned while building)
+- Final-state rule: a processor's `catch` writes terminal `failed` itself when the error is permanent or `isFinalAttempt(job)` (`job.attemptsMade + 1 >= job.opts.attempts`; `attemptsMade` is 0 on the first run on BullMQ 6.7.7, pinned by tests). Permanent errors are rethrown as `UnrecoverableError`. A retryable answer failure before the last attempt goes back to `pending` with content cleared (`requeueAnswer`).
+- Request-path enqueues are bounded (`settlesWithin`, 2 s). The row is written first and is the source of truth; a slow or failed enqueue still returns 202 and the reconciler enqueues stale rows later. Job id = row id, so re-enqueueing is safe.
+- Repository status writes are guarded (`WHERE status IN (...)`) and return whether they applied; never write a terminal state unconditionally.
+- Model errors go through `classifyError` (`src/llm/errors.ts`) only. Tests build real SDK errors with `APIError.generate(...)` and drive `AnthropicModel` through the real SDK client with a stubbed `fetch`, never a hand-rolled mock of the client.
+- Use `FakeModel` in every test: `.script({match, reply, errors, latch})`, `fakeCitation(req, docIndex, start, end?)`, `.requests` to assert what was sent, `latch` + `.release()` to hold an answer mid-stream. Its citations go through the same `resolveCitations` checks as real ones.
+- Timing-dependent behaviour takes options (`staleAfterMs`, `intervalMs`, `partialWriteMs`, backoff overrides in `createQueues`) so tests age rows or shorten delays instead of sleeping.
+- Full-text search: stem once. The OR query re-parses the `english` tsquery with the `simple` config; never run user text through `english` twice. Keep search SQL in `src/db/search.ts` and the selection policy pure in `src/domain/retrieval.ts`.
+- The Citations shapes are assumptions recorded in `docs/notes/citations-spike.md`. If code depends on a new shape detail, add it there with its source and status, and keep `resolveCitations` defensive (drop, never repair).
+- Docs: JSON examples are captured from the running stack (`docs/notes/manual-checks.md`); label anything that is only the code/test shape. Link README → DESIGN → `docs/API.md` → `docs/notes/*` instead of repeating content.
+
+## Agent environment
+- A user hook blocks any Bash command whose text contains the dotenv file name, and a permission rule blocks reading or writing dotenv files. Do not work around either; the app loads the file itself (`src/loadEnv.ts`). `.env.example` is maintained by the human.
+- The session guard rejects a Bash command that uses the word `eval` as a command word; run the eval CLI as `pnpm exec tsx scripts/eval.ts`.
+- Disk is tight: after any image build run `docker image prune -f` and remove app containers.
+- No API key in this build: anything that needs the real API is marked in the plan as `⚠️ not run — no API key (keyless run)` with what remains.
+
 ## Workflow
 - One plan task per agent run; complete all its checkboxes, then stop.
 - Every task adds or updates tests (success and error cases). Pure domain logic is written test-first.

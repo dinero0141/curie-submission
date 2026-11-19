@@ -4,8 +4,9 @@ Design, decisions and status of the chat-with-a-document backend. Running it: [R
 shapes, statuses and error codes: [docs/API.md](docs/API.md). Assumed Claude Citations shapes:
 [docs/notes/citations-spike.md](docs/notes/citations-spike.md).
 
-> Status: draft (plan Task 10, retrieval updated in Task 11, eval harness in Task 12). The live eval has not been run;
-> this build never called the real Claude API (no key). See [Complete vs remaining](#complete-vs-remaining) and
+> Status: final for this build (plan Tasks 1–14). Built **without an Anthropic API key**: the real Claude API was
+> never called, the Citations shapes are assumed, and `pnpm spike` / `pnpm eval` have not been run against Claude. All
+> automated tests run on `FakeModel`. See [Complete vs remaining](#complete-vs-remaining) and
 > [Verification](#verification).
 
 ## Assumptions
@@ -144,8 +145,12 @@ The plan ([docs/plans/20261119-curie-doc-chat-backend.md](docs/plans/20261119-cu
 4. Document API + worker, then conversations + answers: the thin end-to-end path (Task 8) before failure handling, so the riskiest integration was working early.
 5. Failure handling and the reconciler on top of a working path.
 6. Docs draft (Task 10) before ranked retrieval and the live eval, so documentation is not squeezed at the end; Task 11 (ranked retrieval) and Task 12 (live eval, needs a key) come after.
+7. Acceptance check against the brief and a fresh-clone run of the README (Task 13), then final docs (Task 14). SSE (Task 15) was a stretch goal and was not started.
 
-Time log. "Agent-reported" is what each task agent wrote next to its plan header. "Commit" is the wall-clock time of the task's commit, and the gap since the previous commit; that is the measured figure and it is lower than the agents' own estimates.
+Time log. "Agent-reported" is the actual time each task agent wrote next to its plan header (the plan's requested
+figure). "Commit" is the wall-clock time of the task's commit and the gap since the previous commit, measured from
+git. The two differ: the agent figures are about twice the commit gaps, so they read as estimates, and the commit
+gaps are the better measurement of implementation time.
 
 | Task | Plan estimate | Agent-reported | Commit (gap) |
 |---|---|---|---|
@@ -161,13 +166,18 @@ Time log. "Agent-reported" is what each task agent wrote next to its plan header
 | 9 Failure handling + reconciler | 20 | ~20 | 17:46 (6) |
 | 10 Docs draft | 35 | ~20 | 17:55 (9) |
 | 11 Ranked retrieval | 20 | ~20 | 18:02 (7) |
-| 12 Eval harness (live run not possible, keyless) | 10 | ~15 | this commit |
-| Tasks 1–9 total | 185 min | ~200 min | 96 min (16:10–17:46) |
+| 12 Eval harness (live run not possible, keyless) | 10 | ~15 | 18:10 (8) |
+| 13 Acceptance check + fresh-clone run | 10 | ~15 | 18:16 (6) |
+| 14 Final docs | 15 | ~15 | ~18:22 (~6) |
+| **Tasks 1–14 total** | **275 min** | **~285 min (4 h 45)** | **~132 min (16:10–~18:22)** |
 
-Time before the plan commit (brainstorm, plan review) and the human's own review time are not in this table.
+Not in the table: the brainstorm and plan writing before the plan commit, the automated plan review, the human's own
+review time, the code-review phases that follow the tasks, and the recording. Environment incidents cost extra time:
+a full disk (the Task 1 agent stopped at 16:17 and resumed after the human approved clearing the npm cache, inside
+Task 1's 36 min) and a hung Docker Desktop backend that had to be force-restarted.
 
 ## Complete vs remaining
-Complete (Tasks 1–9, 11 and the Task 12 harness, tested with the fake model):
+Complete (plan Tasks 1–14, except the live parts of Tasks 4 and 12; everything tested with the fake model):
 - Add Markdown or plain-text documents; asynchronous preparation with `ready`, or `failed` plus a reason code.
 - Multi-turn conversations about one document; one answer in flight per conversation, enforced by the database.
 - Answers grounded through Citations over sentence blocks; every quote re-verified against the stored content and located by UTF-16 offsets; explicit not-found (`answerable: false`).
@@ -177,17 +187,28 @@ Complete (Tasks 1–9, 11 and the Task 12 harness, tested with the fake model):
 - Docker Compose for the whole stack; README, this file, the API spec.
 - `pnpm eval` (`scripts/eval.ts`): drives the HTTP API with `samples/eval-questions.json` and asserts the expected not-found outcome or an expected substring in a verified citation quote. Never run against real Claude.
 
-Remaining in the plan:
-- Task 12: the live eval run itself; needs an API key (the harness is written and tested).
-- Task 14: final docs. (Task 13, the acceptance check and a fresh-clone run of the README, is done; see [Verification](#verification).)
-- Task 15 (stretch): SSE over Redis Streams.
+Eval results: **none yet.** `pnpm eval` has only been run against the fake model, as a harness check (0/7, as
+expected for the demo model); see [README § Eval](README.md#eval).
 
-Next steps beyond the plan:
-- Run `pnpm spike` with a key and confirm or fix the assumed Citations shapes; tune `effort` with the eval.
-- Honour `retry-after` on 429/529; enable the server-side refusal fallback once it can be exercised.
-- Prompt caching of the document prefix across follow-ups (cost and latency).
-- Flag or drop uncited sentences in answerable replies.
-- A real tokenizer for budgets (CJK); PDF via a converter; `DELETE /documents/:id`; pagination of `GET /documents`.
+What remains, in priority order:
+1. **Run with a real key.** `pnpm spike`, then compare `docs/notes/spike-output/` with each UNVERIFIED fact in
+   [citations-spike.md](docs/notes/citations-spike.md) and mark it confirmed or fix the mapping (and its tests) where
+   it differs. Then `pnpm eval` against `docker compose up --build` with `MODEL_PROVIDER=anthropic`, record the table
+   in the README, and tune `effort`. Until this is done, grounding with real Claude is unproven. A wrong
+   response-shape assumption would show up as answers coming back "not found" (citations dropped), and a request the
+   API rejects as `model_config_error`; neither shows a wrong quote.
+2. **SSE over Redis Streams** (plan Task 15, designed under [Answer delivery](#answer-delivery), not started).
+3. **Query rewrite** for follow-ups and vocabulary mismatch: a cheap model call that turns the question plus history
+   into search terms before ranked retrieval.
+4. **Hybrid ranking**: embeddings (second provider + `pgvector`) fused with the full-text ranking by reciprocal rank
+   fusion (RRF).
+5. **Honour `retry-after`** on 429/529 instead of BullMQ's fixed exponential backoff.
+6. **PDF** via a converter in the prepare step, under the same offset contract.
+7. **Authentication and per-document access** as sketched under [Access control](#access-control).
+
+Smaller follow-ups: prompt caching of the document prefix across follow-ups; the server-side refusal fallback beta;
+flag or drop uncited sentences in answerable replies; a real tokenizer for budgets (CJK); `DELETE /documents/:id`;
+pagination of `GET /documents`; a test for a worker crash mid-job (BullMQ stalled-job path).
 
 ## Verification
 Automated (`pnpm test`: 222 tests, 16 files, all passing; `pnpm typecheck` clean):
@@ -216,14 +237,14 @@ Acceptance checklist (Task 13; each item checked against the code and tests, tes
 | Answer delivered while generation takes time (progressive polling) | `conversations.test.ts` "shows partial content while streaming and rejects a second question with 409" (latched model); `db.test.ts` "answer lifecycle…"; `failures.test.ts` "puts a row back to pending without partial content between retries"; README flow steps 3–4 poll `GET /messages/:id` |
 | Edge cases from Tasks 3–11 | Chunking: CRLF, emoji/CJK, heading without body, lists, 5,000-char sentence, surrogate-safe split, syntax-only (`chunking.test.ts`). Citations: see above. Model boundary: error classes, refusal, timeout, abort (`llm-errors`, `anthropic-model`). API: 400/404/409/413/415, NUL and lone surrogates, body limit, hanging enqueue (`documents`, `conversations`). Workers: retries, final-state rule, idempotent rerun, late failure cannot overwrite `ready`, `max_tokens`, reconciler cases (`documents`, `failures`). Retrieval: needle + neighbours, double stemming, hyphenated terms, tsquery syntax, stopword-only and no-hit fallback (`retrieval`) |
 | Runnable from a clean checkout | Fresh clone of the committed state, `docker compose up -d --build --wait` with no dotenv file, README example flow run unchanged → exit 0 and the README's output ([manual-checks](docs/notes/manual-checks.md)) |
-| Full suite | `pnpm typecheck` clean; `pnpm test` 222/222 in 16 files (run in Task 13) |
+| Full suite | `pnpm typecheck` clean; `pnpm test` 222/222 in 16 files (run in Task 13, re-run in Task 14) |
 
 Not verified: no real Claude call (shapes assumed, spike not run, eval run only against the fake model), real error bodies, `ranked` mode against the real model (tested only with `FakeModel` on a synthetic document), a real full-length paper, a dotenv value overriding the compose default, load and concurrency, a worker crash mid-job (BullMQ stalled-job path). Details in [README § Verification status](README.md#verification-status).
 
 ## AI use
 - Tools: Claude Code. The design came from a Claude Code brainstorm session in which the human made each choice: Anthropic as the only provider (hence lexical retrieval); a persisted job with SSE and polling, later reduced to progressive polling with SSE as a stretch goal after the plan review; Claude Citations over sentence blocks, over model-written quotes with fuzzy matching and over sending the whole document every time.
 - The plan file was the task contract. Each task lists its files, checkboxes and tests. Agents mark checkboxes, record additions (➕) and blockers or unverified items (⚠️), and note actual time. An automated plan-review agent read the plan before any code was written and caught: BullMQ's worker `failed` event fires on every attempt, not only the final one, and stalled jobs bypass it (→ the processor owns terminal state); a reconciler re-adding an existing `jobId` is silently ignored by BullMQ (→ the reconciler checks job state first); double stemming in the OR tsquery (→ second pass with the `simple` config); passages with zero sentences would make the API return 400 (→ every passage has at least one sentence); and the plan was about 5 h (→ scope cuts).
-- Delegation: implementation ran as sequential task subagents, one per plan task with a fresh context. Each had to write tests and pass `pnpm test` and `pnpm typecheck` before committing, and log what it did to a progress file. Multi-agent code review phases follow the tasks in the workflow. These documents were drafted by the Task 10 agent from the code, the plan and the manual-check notes.
+- Delegation: implementation ran as sequential task subagents, one per plan task with a fresh context. Each had to write tests and pass `pnpm test` and `pnpm typecheck` before committing, and log what it did to a progress file. Multi-agent code review phases follow the tasks in the workflow. These documents were drafted by the Task 10 agent from the code, the plan and the manual-check notes, extended by the Task 11–13 agents, and finalised in Task 14.
 - Agent rules: [CLAUDE.md](CLAUDE.md), committed and used as written: the stack, the invariants (UTF-16 `[start, end)` offsets into never-mutated content, slicing only in JS, quotes only from Citations re-verified against `content.slice`, slow work only in workers, the processor owns terminal state, one error envelope), database rules (idempotent migrations, guarded transitions, the test harness) and workflow rules (one task per run, tests for every change, never claim verification that was not run, a DESIGN bullet per decision).
 - How the work was checked: after Tasks 4–9 the orchestrator re-ran `pnpm typecheck` and `pnpm test` itself (180/180 passing, 13 files) instead of trusting the agents' reports. Unverified work had to be marked in the plan, not reported as done.
 - Environment incidents: the disk was full at the start, and the Task 1 agent stopped instead of risking a half install (the human approved clearing the npm cache); Docker Desktop's backend hung and had to be force-restarted; a user hook blocks agents from reading, writing or naming dotenv files, so the app loads its own dotenv file at startup (`src/loadEnv.ts`) and agents never see the key.

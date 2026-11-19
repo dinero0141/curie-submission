@@ -9,6 +9,12 @@ text while the answer is generated.
 - Integration spec (endpoints, shapes, statuses, errors): [docs/API.md](docs/API.md)
 - Agent rules used to build it: [CLAUDE.md](CLAUDE.md)
 - Recording: TBD
+- Status: complete and tested end to end with a fake model, but **built without an Anthropic API key**: no real
+  Claude call has been made. See [Verification status](#verification-status) and
+  [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
+- Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–~18:22 by commit times; the task
+  agents themselves reported ~4 h 45), plus brainstorm/planning before that and review after. Breakdown in
+  [DESIGN.md § Implementation plan and time log](DESIGN.md#implementation-plan-and-time-log).
 
 ## Requirements
 
@@ -199,4 +205,6 @@ Not verified:
 
 To verify with a key: set `MODEL_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in `.env`, run `pnpm spike` and compare
 `docs/notes/spike-output/` with the facts in `docs/notes/citations-spike.md`, then run `pnpm eval` against
-`docker compose up --build` and record its table under [Eval](#eval).
+`docker compose up --build` and record its table under [Eval](#eval). This is the first item of the remaining work;
+the rest (SSE, query rewrite, hybrid ranking, `retry-after`, PDF, auth) is listed in priority order in
+[DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
