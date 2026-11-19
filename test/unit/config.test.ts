@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig } from '../../src/config.js';
+import { ConfigError, DEFAULT_GEMINI_MODEL, loadConfig } from '../../src/config.js';
+import { AnthropicModel } from '../../src/llm/anthropic.js';
+import { FakeModel } from '../../src/llm/fake.js';
+import { GeminiModel } from '../../src/llm/gemini.js';
+import { createAnswerModel } from '../../src/llm/index.js';
 
 const fake = { MODEL_PROVIDER: 'fake' };
 
@@ -75,5 +79,37 @@ describe('loadConfig', () => {
 
   it('does not require a key for the fake provider', () => {
     expect(loadConfig(fake).anthropicApiKey).toBeUndefined();
+  });
+
+  it('requires GEMINI_API_KEY when provider is gemini', () => {
+    expect(() => loadConfig({ MODEL_PROVIDER: 'gemini' })).toThrow(/GEMINI_API_KEY is required when MODEL_PROVIDER=gemini/);
+    expect(() => loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: ' ' })).toThrow(/GEMINI_API_KEY/);
+    // An Anthropic key does not satisfy the gemini provider.
+    expect(() => loadConfig({ MODEL_PROVIDER: 'gemini', ANTHROPIC_API_KEY: 'sk-test' })).toThrow(/GEMINI_API_KEY/);
+  });
+
+  it('accepts the gemini provider with a key, defaults the model, allows an override', () => {
+    const cfg = loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test' });
+    expect(cfg).toMatchObject({ modelProvider: 'gemini', geminiApiKey: 'g-test', geminiModel: 'gemini-3.8-flash' });
+    expect(DEFAULT_GEMINI_MODEL).toBe('gemini-3.8-flash');
+    expect(cfg.anthropicApiKey).toBeUndefined();
+    expect(loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test', GEMINI_MODEL: 'gemini-3.5-flash-lite' }).geminiModel).toBe(
+      'gemini-3.5-flash-lite',
+    );
+    expect(loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test', GEMINI_MODEL: '' }).geminiModel).toBe('gemini-3.8-flash');
+  });
+
+  it('keeps anthropic the default provider and does not need a Gemini key for it', () => {
+    const cfg = loadConfig({ ANTHROPIC_API_KEY: 'sk-test' });
+    expect(cfg.modelProvider).toBe('anthropic');
+    expect(cfg.geminiApiKey).toBeUndefined();
+  });
+});
+
+describe('createAnswerModel', () => {
+  it('builds the model for each provider', () => {
+    expect(createAnswerModel(loadConfig({ MODEL_PROVIDER: 'gemini', GEMINI_API_KEY: 'g-test' }))).toBeInstanceOf(GeminiModel);
+    expect(createAnswerModel(loadConfig({ ANTHROPIC_API_KEY: 'sk-test' }))).toBeInstanceOf(AnthropicModel);
+    expect(createAnswerModel(loadConfig(fake))).toBeInstanceOf(FakeModel);
   });
 });

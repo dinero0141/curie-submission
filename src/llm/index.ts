@@ -2,11 +2,20 @@
 import type { Config } from '../config.js';
 import { AnthropicModel } from './anthropic.js';
 import { FakeModel } from './fake.js';
+import { GeminiModel } from './gemini.js';
 import type { AnswerModel } from './types.js';
 
 export function createAnswerModel(config: Config): AnswerModel {
   // Demo worker: no request recording (it would retain a copy of the document per answered question).
   if (config.modelProvider === 'fake') return new FakeModel([], { record: false });
+  if (config.modelProvider === 'gemini') {
+    return new GeminiModel({
+      apiKey: config.geminiApiKey!, // loadConfig refuses MODEL_PROVIDER=gemini without a key
+      model: config.geminiModel,
+      maxAnswerTokens: config.maxAnswerTokens,
+      timeoutMs: config.modelTimeoutMs,
+    });
+  }
   return new AnthropicModel({
     apiKey: config.anthropicApiKey!, // loadConfig refuses MODEL_PROVIDER=anthropic without a key
     model: config.anthropicModel,

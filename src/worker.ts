@@ -30,11 +30,9 @@ const reconciler = createReconciler({ pool, queues, log });
 reconciler.start(); // runs now, then every 60 s
 
 const provider = config.modelProvider;
-log.info(
-  { queues: workers.map((w) => w.name), modelProvider: provider, ...(provider === 'anthropic' ? { model: config.anthropicModel } : {}) },
-  'worker started',
-);
-if (provider === 'fake') log.warn('MODEL_PROVIDER=fake: answers come from the scripted demo model, not Claude');
+const modelId = provider === 'anthropic' ? config.anthropicModel : provider === 'gemini' ? config.geminiModel : undefined;
+log.info({ queues: workers.map((w) => w.name), modelProvider: provider, ...(modelId ? { model: modelId } : {}) }, 'worker started');
+if (provider === 'fake') log.warn('MODEL_PROVIDER=fake: answers come from the scripted demo model, not a real model');
 
 onShutdown(log, async () => {
   await reconciler.stop();

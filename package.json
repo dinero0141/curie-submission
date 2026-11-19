@@ -16,7 +16,8 @@
     "test:unit": "vitest run --project unit",
     "typecheck": "tsc --noEmit",
     "eval": "tsx scripts/eval.ts",
-    "spike": "tsx scripts/spike-citations.ts"
+    "spike": "tsx scripts/spike-citations.ts",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.10.0",

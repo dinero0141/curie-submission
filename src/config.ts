@@ -10,6 +10,15 @@ const positiveInt = (def: number) =>
 /** Local (host) database URL; also used by `pnpm migrate` when `DATABASE_URL` is unset. */
 export const DEFAULT_DATABASE_URL = 'postgres://curie:curie@localhost:54329/curie';
 
+/**
+ * Default Gemini model: stable, free of charge on the Free Tier, structured output and thinking levels supported
+ * (docs/notes/gemini-notes.md, UNVERIFIED). Not gemini-2.5-*: deprecated, auto-routed to 3.x from 2026-12-01.
+ */
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+
+/** `MODEL_PROVIDER` values. */
+export const MODEL_PROVIDERS = ['anthropic', 'gemini', 'fake'] as const;
+
 /** pino levels (`silent` turns logging off). */
 export const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
 
@@ -17,9 +26,11 @@ const ConfigSchema = z
   .object({
     DATABASE_URL: z.preprocess(emptyToUndefined, z.string().url().default(DEFAULT_DATABASE_URL)),
     REDIS_URL: z.preprocess(emptyToUndefined, z.string().url().default('redis://localhost:63799')),
-    MODEL_PROVIDER: z.preprocess(emptyToUndefined, z.enum(['anthropic', 'fake']).default('anthropic')),
+    MODEL_PROVIDER: z.preprocess(emptyToUndefined, z.enum(MODEL_PROVIDERS).default('anthropic')),
     ANTHROPIC_API_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
     ANTHROPIC_MODEL: z.preprocess(emptyToUndefined, z.string().default('claude-sonnet-5-5')),
+    GEMINI_API_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
+    GEMINI_MODEL: z.preprocess(emptyToUndefined, z.string().default(DEFAULT_GEMINI_MODEL)),
     MAX_DOCUMENT_BYTES: positiveInt(5 * 1024 * 1024),
     FULL_CONTEXT_TOKENS: positiveInt(60_000),
     PASSAGE_TOKENS: positiveInt(DEFAULT_PASSAGE_TOKENS),
@@ -36,14 +47,23 @@ const ConfigSchema = z
         message: 'ANTHROPIC_API_KEY is required when MODEL_PROVIDER=anthropic (set MODEL_PROVIDER=fake for offline mode)',
       });
     }
+    if (cfg.MODEL_PROVIDER === 'gemini' && !cfg.GEMINI_API_KEY) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['GEMINI_API_KEY'],
+        message: 'GEMINI_API_KEY is required when MODEL_PROVIDER=gemini (set MODEL_PROVIDER=fake for offline mode)',
+      });
+    }
   });
 
 export type Config = {
   databaseUrl: string;
   redisUrl: string;
-  modelProvider: 'anthropic' | 'fake';
+  modelProvider: (typeof MODEL_PROVIDERS)[number];
   anthropicApiKey: string | undefined;
   anthropicModel: string;
+  geminiApiKey: string | undefined;
+  geminiModel: string;
   maxDocumentBytes: number;
   /** Fastify bodyLimit: JSON escaping can inflate content, so allow 1.5x; the exact byte check happens on `content`. */
   bodyLimitBytes: number;
@@ -74,6 +94,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     modelProvider: e.MODEL_PROVIDER,
     anthropicApiKey: e.ANTHROPIC_API_KEY,
     anthropicModel: e.ANTHROPIC_MODEL,
+    geminiApiKey: e.GEMINI_API_KEY,
+    geminiModel: e.GEMINI_MODEL,
     maxDocumentBytes: e.MAX_DOCUMENT_BYTES,
     bodyLimitBytes: Math.ceil(e.MAX_DOCUMENT_BYTES * 1.5),
     fullContextTokens: e.FULL_CONTEXT_TOKENS,

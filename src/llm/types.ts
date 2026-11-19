@@ -1,6 +1,6 @@
 /**
  * Provider-neutral model interface. `buildRequest` (prompt.ts) produces an `AnswerRequest`; an `AnswerModel`
- * (Anthropic or Fake) turns it into a `RawAnswer`, which `resolveCitations` maps to verified quotations.
+ * (Anthropic, Gemini or Fake) turns it into a `RawAnswer`, which `resolveCitations` maps to verified quotations.
  */
 import type { RawAnswer, SentDocument } from '../domain/citations.js';
 
