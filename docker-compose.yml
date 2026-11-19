@@ -84,8 +84,11 @@ services:
     command: ["node", "dist/worker.js"]
     environment:
       <<: *app-env
-    # Lets active jobs finish (processors write terminal state) before SIGKILL.
-    stop_grace_period: 30s
+    # worker.close() waits for active jobs, and one answer can run up to MODEL_TIMEOUT_MS (90 s), so the
+    # grace period is above that: processors finish and write terminal state before SIGKILL. If a job is
+    # still killed mid-stream (a longer MODEL_TIMEOUT_MS), its row stays in flight until BullMQ's stalled-job
+    # check reruns it on the next worker (the rerun clears partial content first).
+    stop_grace_period: 120s
     depends_on:
       migrate:
         condition: service_completed_successfully

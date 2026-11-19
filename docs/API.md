@@ -14,7 +14,8 @@ HTTP + JSON. Base URL `http://localhost:3000` under compose. No authentication (
 6. To show a quote in context, fetch `GET /documents/:id/content` once and slice it with each citation's
    `startOffset`/`endOffset`.
 
-Requests with a body must be `content-type: application/json`. All ids are UUIDs.
+Requests with a body must be `content-type: application/json`; any other type (`text/plain`, `text/markdown`,
+form data) is a `415 unsupported_media_type`. All ids are UUIDs.
 
 ## Conventions
 
@@ -48,7 +49,7 @@ Requests with a body must be `content-type: application/json`. All ids are UUIDs
 {"title": "Harbor Archive", "format": "markdown", "content": "# Harbor Archive retrieval pilot\n\n…"}
 ```
 
-- `title`: string, trimmed, 1–300 chars.
+- `title`: string, trimmed, 1–300 chars; no NUL characters or unpaired UTF-16 surrogates (`400 invalid_request`).
 - `format`: `"markdown"` or `"text"`. Markdown headings bound passages and become citation `heading`s; `text` splits
   on blank lines. PDF is not supported.
 - `content`: string, at most `MAX_DOCUMENT_BYTES` (default 5 MiB) as UTF-8; not empty or whitespace-only; no NUL
@@ -95,7 +96,8 @@ Available in every status. Errors: `404 not_found`.
 {"documentId": "5d1fe1e3-…", "question": "How many questions did the hybrid prototype get right?"}
 ```
 
-`question`: string, trimmed, 1–2000 chars (same rule for follow-ups). A conversation always starts with a question;
+`question`: string, trimmed, 1–2000 chars, no NUL characters or unpaired UTF-16 surrogates (same rule for
+follow-ups). A conversation always starts with a question;
 there is no empty conversation.
 
 `202`:
@@ -178,7 +180,8 @@ filled in here from the code (`src/jobs/generateAnswer.ts`), not re-captured ove
 
 Assistant message, `completed` but not answerable. Shape from `src/jobs/generateAnswer.ts` and
 `test/integration/conversations.test.ts`; not captured over HTTP, because the fake model's default answer is always
-answerable:
+answerable. When `retrieval.mode` is `ranked` or `fallback` the model saw only part of the document, and `content`
+is instead "I could not find an answer to this question in the parts of the document that were searched.":
 
 ```json
 {"status": "completed", "answerable": false,
@@ -202,11 +205,11 @@ Errors: `404 not_found`.
 |---|---|
 | `status` | See lifecycle below. |
 | `content` | `pending`: `""`. `streaming`: partial raw model text, grows over time. `completed`: final text. `failed`: `""`. |
-| `answerable` | `null` until `completed`. `true`: grounded answer with ≥ 1 verified citation. `false`: the document does not answer the question; `content` is the fixed not-found message and `citations` is `[]`. |
-| `citations[]` | Verified quotations, in answer order. `quote` is `content.slice(startOffset, endOffset)` of the **document** (never model-written text); `heading` is the nearest Markdown heading (or `null`); `passageId` is internal. `[answerStart, answerEnd)` is the span of the **answer** `content` that this quote supports, for linking a claim to its source. |
-| `finishReason` | Model stop reason, e.g. `end_turn`; `max_tokens` means the answer was cut at the length limit (citations are still verified). |
+| `answerable` | `null` until `completed`. `true`: grounded answer with ≥ 1 verified citation. `false`: no grounded answer; `content` is a fixed not-found message and `citations` is `[]`. With `retrieval.mode: "full"` the whole document was sent; with `ranked`/`fallback` only part of it was, and the message says so. |
+| `citations[]` | Verified quotations, in answer order. `quote` is `content.slice(startOffset, endOffset)` of the **document** (never model-written text); `heading` is the nearest Markdown heading (or `null`); `passageId` is internal. `[answerStart, answerEnd)` is the span of the **answer** `content` that this quote supports, for linking a claim to its source. A quote that spans several sentences is one contiguous slice, so it includes any Markdown syntax between them (list or quote markers, table pipes) that was masked out of what the model saw. |
+| `finishReason` | Model stop reason, e.g. `end_turn`; `max_tokens` means the answer was cut at the length limit after at least one verified citation (a cut answer with none fails with `answer_truncated`). |
 | `error` | `{code, message}` when `failed`, else `null`. |
-| `attempts` | Model attempts so far (retries up to 3). |
+| `attempts` | Processing runs started: normally ≤ 3 (one per BullMQ attempt), but a worker crash (stalled-job rerun) or a reconciler re-enqueue adds runs. |
 | `model`, `usage` | Model id and the provider's token usage, as reported. |
 | `retrieval` | What was sent to the model. `mode`: `full` (the whole document fits `FULL_CONTEXT_TOKENS`, no search), `ranked` (larger document: full-text search hits plus their neighbour passages), `fallback` (larger document but nothing to search for or no hits, e.g. a stopword-only question: the leading passages). `passageIds` / `passageOrdinals`: the passages sent, in document order (ordinal = position in the document, from 0). `hits`: search results best first, `{passageId, ordinal, rank (1-based), score}`; `[]` unless `ranked`; a hit missing from `passageIds` was cut by the token budget. `tokenEstimate` (sent) and `documentTokens` (whole document) use the `chars / 4` estimate. `debug` (including `debug.query`, the searched text and tsquery, `null` in `full` mode) is for diagnosis, not a stable contract. `null` until `completed`. |
 
@@ -256,7 +259,7 @@ HTTP errors (`{"error": {code, message}}`):
 
 | Status | Code | When |
 |---|---|---|
-| 400 | `invalid_request` | Body fails validation (missing/empty/too long field, unknown `format`, body not an object), bad `content-length` |
+| 400 | `invalid_request` | Body fails validation (missing/empty/too long field, NUL or unpaired surrogate in `title`/`question`, unknown `format`, body not an object), bad `content-length` |
 | 400 | `invalid_json` | Body is empty or not valid JSON |
 | 400 | `empty_document` | `content` is empty or whitespace-only |
 | 400 | `invalid_content` | `content` contains NUL or an unpaired UTF-16 surrogate |
@@ -265,7 +268,7 @@ HTTP errors (`{"error": {code, message}}`):
 | 409 | `answer_in_progress` | Asking while the conversation's previous answer is in flight |
 | 413 | `document_too_large` | `content` exceeds `MAX_DOCUMENT_BYTES` (UTF-8 bytes) |
 | 413 | `payload_too_large` | Whole body exceeds 1.5 × `MAX_DOCUMENT_BYTES` |
-| 415 | `unsupported_media_type` | Body is not `application/json` |
+| 415 | `unsupported_media_type` | Body is not `application/json` (e.g. `text/plain`, `text/markdown`, form data) |
 | 500 | `internal_error` | Unexpected server error |
 
 Document `failureCode`:
@@ -285,7 +288,9 @@ Answer `error.code`:
 | `context_too_large` | The model rejected the prompt as too long | Not retried; asking again sends the same passages |
 | `model_config_error` | Request rejected (bad key, unknown model, invalid request) | No; operator problem |
 | `model_refused` | The model declined to answer | Rephrase |
-| `internal_error` | Server bug or inconsistent data | Ask again |
+| `answer_truncated` | The answer hit the `max_tokens` limit before it cited the document; says nothing about whether the document answers the question. Not retried | Ask a narrower question; operators can raise `MAX_ANSWER_TOKENS` |
+| `internal_error` | Server bug or inconsistent data; `message` is generic (details are only in the worker log) | Ask again |
 | `stalled` | Job lost or failed outside the processor | Ask again |
 
-The error `message` of a failed answer may contain provider error text; show `code`-based copy to end users.
+The error `message` of a failed answer may contain provider error text (never internal details: `internal_error`
+always carries a generic message); show `code`-based copy to end users.

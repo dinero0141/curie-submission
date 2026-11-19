@@ -61,9 +61,9 @@ function toRow(r: Record<string, unknown>): MessageRow {
  */
 export async function insertMessage(
   q: Queryable,
-  msg: { conversationId: string; role: MessageRole; content?: string; status?: MessageStatus },
+  msg: { conversationId: string; role: MessageRole; content?: string },
 ): Promise<MessageRow> {
-  const status = msg.status ?? (msg.role === 'user' ? 'completed' : 'pending');
+  const status: MessageStatus = msg.role === 'user' ? 'completed' : 'pending';
   const res = await q.query(
     `INSERT INTO messages (conversation_id, seq, role, content, status, completed_at)
      SELECT $1, coalesce(max(seq), 0) + 1, $2, $3, $4, CASE WHEN $4 = 'completed' THEN now() END
@@ -88,7 +88,9 @@ export async function listMessages(q: Queryable, conversationId: string): Promis
 
 /**
  * Begin a processing run: clear any partial content from a previous (stalled) run, move to
- * `streaming`, bump `attempts`. Returns null when the message is missing or already terminal.
+ * `streaming`, bump `attempts`. `attempts` counts processing runs, not BullMQ attempts: a stalled-job rerun
+ * or a reconciler re-enqueue adds a run, so it can exceed the job's 3 attempts. Returns null when the
+ * message is missing or already terminal.
  */
 export async function startAnswer(q: Queryable, id: string): Promise<MessageRow | null> {
   const res = await q.query(

@@ -129,6 +129,25 @@ describe('AnthropicModel (stubbed fetch, assumed event shapes)', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it.each([
+    ['overloaded_error', 'Overloaded', { code: 'model_unavailable', retryable: true }],
+    ['invalid_request_error', 'messages: something is wrong', { code: 'model_config_error', retryable: false }],
+    ['invalid_request_error', 'prompt is too long: 1234567 tokens > 1000000 maximum', { code: 'context_too_large', retryable: false }],
+  ])('classifies a mid-stream `event: error` (%s) as the SDK raises it, after earlier deltas', async (type, message, expected) => {
+    const req = sampleRequest();
+    const head = answerEvents(req, 0, 0).slice(0, 6); // message_start .. first text delta
+    const events = sse(head) + `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`;
+    const { fetch } = stubFetch(
+      () => new Response(events, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    );
+    const deltas: string[] = [];
+    const err = await model(fetch).generate(req, (t) => deltas.push(t), new AbortController().signal).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Anthropic.APIError);
+    expect((err as InstanceType<typeof Anthropic.APIError>).status).toBeUndefined();
+    expect(classifyError(err)).toMatchObject(expected);
+    expect(deltas.join('')).toBe('According to the note, ');
+  });
+
   it('maps a 401 to a permanent model_config_error', async () => {
     const { fetch } = stubFetch(
       () =>

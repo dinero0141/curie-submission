@@ -6,12 +6,12 @@ const emptyToUndefined = (v: unknown) => (typeof v === 'string' && v.trim() === 
 const positiveInt = (def: number) =>
   z.preprocess(emptyToUndefined, z.coerce.number().int().positive().default(def));
 
+/** Local (host) database URL; also used by `pnpm migrate` when `DATABASE_URL` is unset. */
+export const DEFAULT_DATABASE_URL = 'postgres://curie:curie@localhost:54329/curie';
+
 const ConfigSchema = z
   .object({
-    DATABASE_URL: z.preprocess(
-      emptyToUndefined,
-      z.string().url().default('postgres://curie:curie@localhost:54329/curie'),
-    ),
+    DATABASE_URL: z.preprocess(emptyToUndefined, z.string().url().default(DEFAULT_DATABASE_URL)),
     REDIS_URL: z.preprocess(emptyToUndefined, z.string().url().default('redis://localhost:63799')),
     MODEL_PROVIDER: z.preprocess(emptyToUndefined, z.enum(['anthropic', 'fake']).default('anthropic')),
     ANTHROPIC_API_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
@@ -32,8 +32,6 @@ const ConfigSchema = z
       });
     }
   });
-
-export type Env = z.infer<typeof ConfigSchema>;
 
 export type Config = {
   databaseUrl: string;

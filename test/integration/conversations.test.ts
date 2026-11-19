@@ -16,6 +16,7 @@ import { MAX_QUESTION_LENGTH } from '../../src/http/routes/conversations.js';
 import { createGenerateAnswerWorker } from '../../src/jobs/generateAnswer.js';
 import { createPrepareDocumentWorker } from '../../src/jobs/prepareDocument.js';
 import { closeQueues, createQueues, createRedisConnection, type Queues } from '../../src/jobs/queues.js';
+import { createReconciler } from '../../src/jobs/reconciler.js';
 import { FakeModel, fakeCitation } from '../../src/llm/fake.js';
 import type { AnswerRequest } from '../../src/llm/types.js';
 import { useIntegrationEnv } from './setup.js';
@@ -59,6 +60,7 @@ fake.script({
 fake.script({ match: 'who funded', reply: { text: 'NOT_IN_DOCUMENT: the document does not mention funding.' } });
 fake.script({ match: 'uncited', reply: { text: 'Probably around forty questions.' } });
 fake.script({ match: 'latched question', latch: true });
+fake.script({ match: 'concurrent question', latch: true });
 fake.script({
   match: 'bad key',
   errors: [Anthropic.APIError.generate(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }, undefined, new Headers())],
@@ -134,22 +136,32 @@ async function expectVerifiedCitations(answer: Body) {
   }
 }
 
-describe('conversation flow', () => {
-  let conversationId: string;
-  let firstAnswer: Body;
+const FIRST_QUESTION = 'How many questions did the hybrid prototype get right?';
 
+/** The request the model received for `question` (the worker runs several jobs at once, so not `lastRequest`). */
+function requestFor(question: string): AnswerRequest {
+  const req = fake.requests.filter((r) => r.question === question).at(-1);
+  if (!req) throw new Error(`no model request for ${JSON.stringify(question)}`);
+  return req;
+}
+
+/** A new conversation whose first answer is terminal. */
+async function conversationWithFirstAnswer(): Promise<{ conversationId: string; ids: Body; firstAnswer: Body }> {
+  const res = await start(FIRST_QUESTION);
+  expect(res.statusCode).toBe(202);
+  const ids = res.json();
+  const firstAnswer = await poll(`/messages/${ids.assistantMessageId}`, terminal);
+  return { conversationId: ids.conversationId, ids, firstAnswer };
+}
+
+describe('conversation flow', () => {
   it('answers the first question with verified citations', async () => {
-    const res = await start('How many questions did the hybrid prototype get right?');
-    expect(res.statusCode).toBe(202);
-    const ids = res.json();
+    const { ids, firstAnswer } = await conversationWithFirstAnswer();
     expect(ids).toEqual({
       conversationId: expect.any(String),
       userMessageId: expect.any(String),
       assistantMessageId: expect.any(String),
     });
-    conversationId = ids.conversationId;
-
-    firstAnswer = await poll(`/messages/${ids.assistantMessageId}`, terminal);
     expect(firstAnswer).toMatchObject({
       role: 'assistant',
       status: 'completed',
@@ -172,10 +184,11 @@ describe('conversation flow', () => {
     // `full` mode sends every passage, in document order.
     const { passageCount } = (await app.inject({ method: 'GET', url: `/documents/${docId}` })).json();
     expect(firstAnswer.retrieval.passageOrdinals).toEqual([...Array(passageCount).keys()]);
-    expect(fake.lastRequest!.documents).toHaveLength(passageCount);
+    expect(requestFor(FIRST_QUESTION).documents).toHaveLength(passageCount);
   });
 
   it('sends the earlier turn as history on a follow-up', async () => {
+    const { conversationId, firstAnswer } = await conversationWithFirstAnswer();
     const res = await ask(conversationId, 'And keyword search?');
     expect(res.statusCode).toBe(202);
     const answer = await poll(`/messages/${res.json().assistantMessageId}`, terminal);
@@ -189,10 +202,7 @@ describe('conversation flow', () => {
     const second = answer.citations[1];
     expect(answer.content.slice(second.answerStart, second.answerEnd)).toBe(' Its median response time was 0.7 seconds.');
 
-    expect(fake.lastRequest!.question).toBe('And keyword search?');
-    expect(fake.lastRequest!.history).toEqual([
-      { question: 'How many questions did the hybrid prototype get right?', answer: firstAnswer.content },
-    ]);
+    expect(requestFor('And keyword search?').history).toEqual([{ question: FIRST_QUESTION, answer: firstAnswer.content }]);
 
     const convo = (await app.inject({ method: 'GET', url: `/conversations/${conversationId}` })).json();
     expect(convo.documentId).toBe(docId);
@@ -207,7 +217,7 @@ describe('conversation flow', () => {
   });
 
   it('returns a not-found answer without citations when the model says NOT_IN_DOCUMENT', async () => {
-    const res = await ask(conversationId, 'Who funded the study?');
+    const res = await start('Who funded the study?');
     const answer = await poll(`/messages/${res.json().assistantMessageId}`, terminal);
     expect(answer).toMatchObject({
       status: 'completed',
@@ -221,7 +231,7 @@ describe('conversation flow', () => {
   });
 
   it('treats a reply without verified citations as not found', async () => {
-    const res = await ask(conversationId, 'An uncited guess?');
+    const res = await start('An uncited guess?');
     const answer = await poll(`/messages/${res.json().assistantMessageId}`, terminal);
     expect(answer).toMatchObject({
       status: 'completed',
@@ -267,6 +277,30 @@ describe('progressive delivery and one answer at a time', () => {
     await poll(`/messages/${next.json().assistantMessageId}`, terminal);
   });
 
+  it('lets exactly one of several simultaneous questions through: the rest get 409, never 500', async () => {
+    const { conversationId } = await conversationWithFirstAnswer();
+    const latched = fake.whenLatched();
+    // Without the conversation row lock these race on seq allocation (a 500 on the seq unique key); checked by
+    // removing the lock: 20 requests reliably produce it, a handful may not.
+    const n = 20;
+    const results = await Promise.all(Array.from({ length: n }, (_, i) => ask(conversationId, `Concurrent question ${i}?`)));
+    expect(results.map((r) => r.statusCode).sort()).toEqual([202, ...Array(n - 1).fill(409)]);
+    for (const r of results.filter((x) => x.statusCode === 409)) expect(r.json().error.code).toBe('answer_in_progress');
+    await latched;
+
+    const convo = (await app.inject({ method: 'GET', url: `/conversations/${conversationId}` })).json();
+    expect(convo.messages.map((m: Body) => [m.seq, m.role])).toEqual([
+      [1, 'user'],
+      [2, 'assistant'],
+      [3, 'user'],
+      [4, 'assistant'],
+    ]);
+
+    fake.release('concurrent question');
+    const winner = results.find((r) => r.statusCode === 202)!.json();
+    expect((await poll(`/messages/${winner.assistantMessageId}`, terminal)).status).toBe('completed');
+  });
+
   it('records a permanent model error on the message and frees the conversation', async () => {
     const res = await start('Ask with a bad key');
     const { conversationId, assistantMessageId } = res.json();
@@ -305,6 +339,9 @@ describe('validation', () => {
     ['too long question', { question: 'x'.repeat(MAX_QUESTION_LENGTH + 1) }, `at most ${MAX_QUESTION_LENGTH}`],
     ['missing question', {}, 'question must be a string'],
     ['missing documentId', { noDoc: true, question: 'Hi?' }, 'documentId must be a string'],
+    // Postgres rejects NUL (would be a 500) and rewrites a lone surrogate to U+FFFD.
+    ['NUL in the question', { question: 'a\u0000b' }, 'NUL'],
+    ['lone surrogate in the question', { question: 'broken \ud800 pair' }, 'surrogate'],
   ])('400 for %s', async (_name, body, message) => {
     const payload = 'noDoc' in body ? { question: body.question } : { documentId: docId, ...body };
     const res = await app.inject({ method: 'POST', url: '/conversations', payload });
@@ -342,6 +379,45 @@ describe('validation', () => {
     for (const res of cases) {
       expect(res.statusCode).toBe(404);
       expect(res.json().error.code).toBe('not_found');
+    }
+  });
+});
+
+describe('generate-answer enqueue failures on the request path', () => {
+  it.each([
+    ['hangs', () => new Promise(() => {})],
+    ['rejects', () => Promise.reject(new Error('redis is down'))],
+  ])('answers 202 with a pending answer when enqueueing %s, and the reconciler picks it up', async (_name, add) => {
+    const broken = { add } as unknown as Queues['generateAnswer'];
+    const brokenApp = buildApp({
+      pool: env.pool,
+      config: { maxDocumentBytes: 1_000_000, bodyLimitBytes: 1_500_000 },
+      queues: { prepareDocument: queues.prepareDocument, generateAnswer: broken },
+      enqueueTimeoutMs: 50,
+    });
+    try {
+      // New conversation and follow-up: both routes enqueue.
+      const created = await brokenApp.inject({ method: 'POST', url: '/conversations', payload: { documentId: docId, question: FIRST_QUESTION } });
+      expect(created.statusCode).toBe(202);
+      const { conversationId } = await conversationWithFirstAnswer();
+      const followUp = await brokenApp.inject({
+        method: 'POST',
+        url: `/conversations/${conversationId}/messages`,
+        payload: { question: FIRST_QUESTION },
+      });
+      expect(followUp.statusCode).toBe(202);
+
+      const ids = [created.json().assistantMessageId, followUp.json().assistantMessageId] as string[];
+      for (const id of ids) {
+        expect((await app.inject({ method: 'GET', url: `/messages/${id}` })).json().status).toBe('pending');
+        expect(await queues.generateAnswer.getJob(id)).toBeUndefined();
+      }
+
+      const report = await createReconciler({ pool: env.pool, queues, staleAfterMs: 0 }).runOnce();
+      expect(report!.answers.enqueued).toEqual(expect.arrayContaining(ids));
+      for (const id of ids) expect((await poll(`/messages/${id}`, terminal)).status).toBe('completed');
+    } finally {
+      await brokenApp.close();
     }
   });
 });

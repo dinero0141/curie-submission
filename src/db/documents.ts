@@ -1,6 +1,7 @@
+import type { DocumentFormat } from '../domain/chunking.js';
 import type { Queryable } from './pool.js';
 
-export type DocumentFormat = 'markdown' | 'text';
+export type { DocumentFormat };
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
 
 /** Document metadata without the (possibly large) content. */

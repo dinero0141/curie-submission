@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type pg from 'pg';
+import { DEFAULT_DATABASE_URL } from '../config.js';
 import { loadEnvFile } from '../loadEnv.js';
 import { createPool } from './pool.js';
 
@@ -33,8 +34,6 @@ export async function migrate(pool: pg.Pool, dir: string = MIGRATIONS_DIR): Prom
   }
   return files;
 }
-
-const DEFAULT_DATABASE_URL = 'postgres://curie:curie@localhost:54329/curie';
 
 async function main(): Promise<void> {
   loadEnvFile();

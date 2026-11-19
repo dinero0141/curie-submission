@@ -21,7 +21,6 @@ describe('classifyError', () => {
     ['connection error', new Anthropic.APIConnectionError({ message: 'socket hang up' })],
     ['SDK connection timeout', new Anthropic.APIConnectionTimeoutError()],
     ['our wall-clock timeout', new ModelTimeoutError(90_000)],
-    ['AbortSignal.timeout DOMException', new DOMException('The operation timed out.', 'TimeoutError')],
     ['user abort (worker shutdown)', new Anthropic.APIUserAbortError()],
     ['mid-stream overloaded event', new Anthropic.APIError(undefined, body('overloaded_error', 'Overloaded'), undefined, new Headers(), 'overloaded_error')],
     ['mid-stream error without type', new Anthropic.APIError(undefined, undefined, 'stream broke', undefined)],
@@ -60,7 +59,7 @@ describe('classifyError', () => {
   });
 
   it('refusal → permanent model_refused', () => {
-    const c = classifyError(new ModelRefusalError('cyber', 'partial'));
+    const c = classifyError(new ModelRefusalError('cyber'));
     expect(c).toEqual({ code: 'model_refused', retryable: false, message: 'model refused to answer (category: cyber)' });
   });
 

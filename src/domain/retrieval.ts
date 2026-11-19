@@ -39,8 +39,6 @@ export type RetrievalOptions = {
   /** `FULL_CONTEXT_TOKENS`: send the whole document when it is at most this many (estimated) tokens. Also the
    * budget for `ranked` and `fallback` selections. */
   fullContextTokens: number;
-  /** Hits considered in ranked mode (default `RANKED_TOP_K`). */
-  topK?: number;
 };
 
 /**
@@ -75,7 +73,7 @@ export function selectPassages<P extends RetrievablePassage>(
     return { mode: 'full', passages: ordered, tokenEstimate: documentTokens, documentTokens, hits: [] };
   }
 
-  const ranked = rankedSelection(ordered, budget, hits ?? [], opts.topK ?? RANKED_TOP_K);
+  const ranked = rankedSelection(ordered, budget, hits ?? []);
   if (ranked) return { mode: 'ranked', ...ranked, documentTokens };
 
   // Leading passages within the budget; always at least one so the request is never empty.
@@ -99,12 +97,11 @@ function rankedSelection<P extends RetrievablePassage>(
   ordered: readonly P[],
   budget: number,
   hits: readonly RankedHit[],
-  topK: number,
 ): { passages: P[]; tokenEstimate: number; hits: RetrievalHit[] } | null {
   const byOrdinal = new Map(ordered.map((p) => [p.ordinal, p]));
   const recorded: RetrievalHit[] = [];
   const seenHits = new Set<number>();
-  hits.slice(0, topK).forEach((h, i) => {
+  hits.slice(0, RANKED_TOP_K).forEach((h, i) => {
     const p = byOrdinal.get(h.ordinal);
     if (!p || seenHits.has(h.ordinal)) return;
     seenHits.add(h.ordinal);

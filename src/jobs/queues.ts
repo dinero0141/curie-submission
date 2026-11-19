@@ -2,8 +2,9 @@
  * BullMQ queues and Redis connections shared by the API (producer) and the worker (consumer).
  * Job ids are the row ids (`documentId`, `assistantMessageId`), so enqueueing twice is a no-op.
  */
-import { Queue, type DefaultJobOptions } from 'bullmq';
+import { Queue, type DefaultJobOptions, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
+import type { Logger } from 'pino';
 
 export const QUEUE_NAMES = {
   prepareDocument: 'prepare-document',
@@ -14,8 +15,8 @@ export type PrepareDocumentJobData = { documentId: string };
 /** `messageId` is the assistant message being answered (also the job id). */
 export type GenerateAnswerJobData = { messageId: string };
 
-/** Defaults for prepare-document jobs; the processor's final-state rule reads `attempts` from the job. */
-export const PREPARE_DOCUMENT_JOB_OPTIONS: DefaultJobOptions = {
+/** Defaults for both queues; the processors' final-state rule reads `attempts` from the job. */
+export const JOB_OPTIONS: DefaultJobOptions = {
   attempts: 3,
   backoff: { type: 'exponential', delay: 1_000 },
   // Keep finished jobs for a while so the reconciler can tell "completed/failed" from "never enqueued".
@@ -23,17 +24,34 @@ export const PREPARE_DOCUMENT_JOB_OPTIONS: DefaultJobOptions = {
   removeOnFail: { age: 7 * 24 * 3600 },
 };
 
-/** Defaults for generate-answer jobs (same retry/retention policy; the processor applies the final-state rule). */
-export const GENERATE_ANSWER_JOB_OPTIONS: DefaultJobOptions = { ...PREPARE_DOCUMENT_JOB_OPTIONS };
+/** True when this run is the job's last allowed attempt (`attemptsMade` counts finished attempts). */
+export function isFinalAttempt(job: Pick<Job, 'attemptsMade' | 'opts'>): boolean {
+  return job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+}
+
+/** Error text for logs and stored failure messages. */
+export function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message || err.name : String(err);
+}
 
 /**
  * ioredis connection for BullMQ. `maxRetriesPerRequest: null` is required for workers' blocking
  * commands and keeps producers retrying through a Redis restart instead of failing the command.
+ * Connection errors are retried by ioredis (an unhandled 'error' event would crash the process); the
+ * first error of each outage is logged, and the reconnect after it.
  */
-export function createRedisConnection(url: string): Redis {
+export function createRedisConnection(url: string, log?: Pick<Logger, 'warn' | 'info'>): Redis {
   const redis = new Redis(url, { maxRetriesPerRequest: null });
-  // Connection errors are retried by ioredis; an unhandled 'error' event would crash the process.
-  redis.on('error', () => {});
+  let down = false;
+  redis.on('error', (err: unknown) => {
+    if (down) return;
+    down = true;
+    log?.warn({ err: messageOf(err) }, 'redis connection error; retrying');
+  });
+  redis.on('ready', () => {
+    if (down) log?.info('redis connection restored');
+    down = false;
+  });
   return redis;
 }
 
@@ -56,12 +74,12 @@ export function createQueues(connection: Redis, opts: QueueOptions = {}): Queues
     prepareDocument: new Queue<PrepareDocumentJobData>(QUEUE_NAMES.prepareDocument, {
       connection,
       ...prefix,
-      defaultJobOptions: { ...PREPARE_DOCUMENT_JOB_OPTIONS, ...opts.prepareDocument },
+      defaultJobOptions: { ...JOB_OPTIONS, ...opts.prepareDocument },
     }),
     generateAnswer: new Queue<GenerateAnswerJobData>(QUEUE_NAMES.generateAnswer, {
       connection,
       ...prefix,
-      defaultJobOptions: { ...GENERATE_ANSWER_JOB_OPTIONS, ...opts.generateAnswer },
+      defaultJobOptions: { ...JOB_OPTIONS, ...opts.generateAnswer },
     }),
   };
 }
@@ -99,4 +117,19 @@ export async function settlesWithin(promise: Promise<unknown>, ms: number): Prom
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Request-path enqueue: wait at most `ms`. On a timeout or failure log a warning and return; the row is
+ * already written and is the source of truth, and the reconciler enqueues stale in-flight rows later.
+ */
+export async function enqueueOrDefer(
+  enqueue: Promise<unknown>,
+  ms: number,
+  log: Pick<Logger, 'warn'>,
+  context: Record<string, unknown>,
+  what: string,
+): Promise<void> {
+  const enqueued = await settlesWithin(enqueue, ms);
+  if (!enqueued.ok) log.warn({ ...context, err: enqueued.error }, `${what} enqueue deferred to reconciler`);
 }

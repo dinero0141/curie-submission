@@ -1,4 +1,5 @@
 import pg from 'pg';
+import type { Logger } from 'pino';
 
 /** Anything that can run a query: the pool itself or a checked-out client inside a transaction. */
 export type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
@@ -7,6 +8,8 @@ export type PoolOptions = {
   /** Fail fast instead of hanging when Postgres is unreachable. */
   connectionTimeoutMillis?: number;
   max?: number;
+  /** Where idle-client errors are reported (they never crash the process). */
+  log?: Pick<Logger, 'warn'>;
 };
 
 export function createPool(connectionString: string, opts: PoolOptions = {}): pg.Pool {
@@ -15,8 +18,8 @@ export function createPool(connectionString: string, opts: PoolOptions = {}): pg
     connectionTimeoutMillis: opts.connectionTimeoutMillis ?? 5_000,
     max: opts.max ?? 10,
   });
-  // An idle client erroring (e.g. Postgres restart) must not crash the process.
-  pool.on('error', () => {});
+  // An idle client erroring (e.g. Postgres restart) must not crash the process; the pool replaces it.
+  pool.on('error', (err) => opts.log?.warn({ err: err.message }, 'idle postgres client error'));
   return pool;
 }
 

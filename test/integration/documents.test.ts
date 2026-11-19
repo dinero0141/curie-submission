@@ -246,7 +246,7 @@ describe('POST /documents → prepare-document', () => {
     expect(await run({ ...job, id: ghost, data: { documentId: ghost } })).toEqual({ outcome: 'skipped', reason: 'missing' });
   });
 
-  it('does not overwrite a ready document when a late failure arrives', async () => {
+  it('skips a rerun of a ready document before chunking, even with a failing chunker', async () => {
     const doc = await insertDocument(env.pool, { title: 'x', format: 'text', content: 'Hello there.' });
     const run = createPrepareDocumentProcessor({ pool: env.pool, passageTokens: 400 });
     await run({ id: doc.id, data: { documentId: doc.id }, attemptsMade: 0, opts: { attempts: 1 } });
@@ -263,6 +263,44 @@ describe('POST /documents → prepare-document', () => {
     ).resolves.toEqual({ outcome: 'skipped', reason: 'terminal' });
     expect((await getDocumentSummary(env.pool, doc.id))?.status).toBe('ready');
   });
+
+  // The window the code defends: the row turns terminal after `markDocumentProcessing` but before the
+  // final transaction (another run, or the reconciler, finished it meanwhile).
+  const markReady = (id: string) =>
+    env.pool.query(`UPDATE documents SET status = 'ready', passage_count = 0, ready_at = now() WHERE id = $1`, [id]);
+
+  it('does not write passages when the row turned terminal during chunking', async () => {
+    const doc = await insertDocument(env.pool, { title: 'x', format: 'text', content: 'Hello there.' });
+    const racing = createPrepareDocumentProcessor({
+      pool: env.pool,
+      passageTokens: 400,
+      chunk: async (content, format, opts) => {
+        await markReady(doc.id);
+        return chunkDocument(content, format, opts);
+      },
+    });
+    await expect(
+      racing({ id: doc.id, data: { documentId: doc.id }, attemptsMade: 0, opts: { attempts: 1 } }),
+    ).resolves.toEqual({ outcome: 'skipped', reason: 'terminal' });
+    expect(await listPassages(env.pool, doc.id)).toEqual([]);
+    expect(await getDocumentSummary(env.pool, doc.id)).toMatchObject({ status: 'ready', passageCount: 0 });
+  });
+
+  it('does not overwrite a ready document when a late failure arrives on the final attempt', async () => {
+    const doc = await insertDocument(env.pool, { title: 'x', format: 'text', content: 'Hello there.' });
+    const racing = createPrepareDocumentProcessor({
+      pool: env.pool,
+      passageTokens: 400,
+      chunk: async () => {
+        await markReady(doc.id);
+        throw new Error('boom');
+      },
+    });
+    await expect(
+      racing({ id: doc.id, data: { documentId: doc.id }, attemptsMade: 0, opts: { attempts: 1 } }),
+    ).rejects.toThrow('boom');
+    expect(await getDocumentSummary(env.pool, doc.id)).toMatchObject({ status: 'ready', failureCode: null });
+  });
 });
 
 describe('POST /documents validation', () => {
@@ -277,6 +315,8 @@ describe('POST /documents validation', () => {
     ['non-string content', { ...valid, content: 42 }, 'invalid_request'],
     ['NUL character', { ...valid, content: 'a\u0000b' }, 'invalid_content'],
     ['lone surrogate', { ...valid, content: 'broken \ud800 pair' }, 'invalid_content'],
+    ['NUL in the title', { ...valid, title: 'a\u0000b' }, 'invalid_request'],
+    ['lone surrogate in the title', { ...valid, title: 'broken \udc00 title' }, 'invalid_request'],
   ])('rejects %s with 400', async (_name, body, code) => {
     const before = (await env.pool.query('SELECT count(*)::int AS n FROM documents')).rows[0].n;
     const res = await upload(body);
@@ -300,14 +340,16 @@ describe('POST /documents validation', () => {
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.code).toBe('invalid_json');
 
-    const text = await app.inject({
-      method: 'POST',
-      url: '/documents',
-      headers: { 'content-type': 'text/markdown' },
-      payload: '# hi',
-    });
-    expect(text.statusCode).toBe(415);
-    expect(text.json().error.code).toBe('unsupported_media_type');
+    for (const contentType of ['text/markdown', 'text/plain', 'application/x-www-form-urlencoded']) {
+      const text = await app.inject({
+        method: 'POST',
+        url: '/documents',
+        headers: { 'content-type': contentType },
+        payload: '# hi',
+      });
+      expect(text.statusCode, contentType).toBe(415);
+      expect(text.json().error.code).toBe('unsupported_media_type');
+    }
   });
 
   it('returns 413 when content exceeds MAX_DOCUMENT_BYTES in UTF-8 bytes', async () => {

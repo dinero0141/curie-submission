@@ -56,7 +56,7 @@ const correct = new FakeModel([
 const demo = new FakeModel();
 
 let current: AnswerModel = correct;
-const switchable: AnswerModel = { provider: 'fake', generate: (...args) => current.generate(...args) };
+const switchable: AnswerModel = { generate: (...args) => current.generate(...args) };
 
 let redis: Redis;
 let queues: Queues;

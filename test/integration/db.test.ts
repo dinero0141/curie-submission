@@ -1,3 +1,4 @@
+import type pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { insertConversation, lockConversation } from '../../src/db/conversations.js';
 import {
@@ -16,6 +17,7 @@ import {
   insertMessage,
   listMessages,
   ONE_INFLIGHT_ANSWER,
+  requeueAnswer,
   startAnswer,
   writePartialContent,
 } from '../../src/db/messages.js';
@@ -257,6 +259,37 @@ describe('messages', () => {
     expect((await listMessages(env.pool, convId)).map((m) => m.seq)).toEqual([1, 2, 3, 4]);
   });
 
+  it('serializes concurrent inserts with the lock; without it they collide on seq', async () => {
+    /** tx A inserts and holds its transaction open until `release`; tx B inserts meanwhile. */
+    async function race(lock: boolean) {
+      const convId = await newConversation();
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      let inserted!: () => void;
+      const aInserted = new Promise<void>((r) => (inserted = r));
+      const insertUser = async (tx: pg.PoolClient, content: string) => {
+        if (lock) await lockConversation(tx, convId);
+        return insertMessage(tx, { conversationId: convId, role: 'user', content });
+      };
+      const a = withTx(env.pool, async (tx) => {
+        const m = await insertUser(tx, 'A');
+        inserted();
+        await held;
+        return m.seq;
+      });
+      await aInserted;
+      const b = withTx(env.pool, (tx) => insertUser(tx, 'B').then((m) => m.seq)).catch((e: unknown) => e);
+      await new Promise((r) => setTimeout(r, 50)); // B is now blocked (on the row lock, or on A's seq key)
+      release();
+      return [await a, await b] as const;
+    }
+
+    expect(await race(true)).toEqual([1, 2]);
+    const [seqA, errB] = await race(false);
+    expect(seqA).toBe(1);
+    expect(isUniqueViolation(errB, 'messages_conversation_seq_key')).toBe(true);
+  });
+
   it('seq collisions surface as a different unique violation', async () => {
     const convId = await newConversation();
     await insertMessage(env.pool, { conversationId: convId, role: 'user', content: 'Q1' });
@@ -317,5 +350,38 @@ describe('messages', () => {
     expect(await writePartialContent(env.pool, msg.id, 'late')).toBe(false);
     expect((await getMessage(env.pool, msg.id))?.status).toBe('completed');
     expect(await getMessage(env.pool, '00000000-0000-0000-0000-000000000000')).toBeNull();
+  });
+
+  it('requeueAnswer clears partial content, and only from streaming', async () => {
+    const convId = await newConversation();
+    const msg = await insertMessage(env.pool, { conversationId: convId, role: 'assistant' });
+    expect(await requeueAnswer(env.pool, msg.id)).toBe(false); // pending
+
+    await startAnswer(env.pool, msg.id);
+    await writePartialContent(env.pool, msg.id, 'half an answer');
+    expect(await requeueAnswer(env.pool, msg.id)).toBe(true);
+    expect(await getMessage(env.pool, msg.id)).toMatchObject({ status: 'pending', content: '', attempts: 1 });
+
+    await failAnswer(env.pool, msg.id, 'model_unavailable', 'x');
+    expect(await requeueAnswer(env.pool, msg.id)).toBe(false);
+    expect((await getMessage(env.pool, msg.id))?.status).toBe('failed');
+  });
+
+  it('completeAnswer never reopens a failed row (a late processor loses to the reconciler)', async () => {
+    const convId = await newConversation();
+    const msg = await insertMessage(env.pool, { conversationId: convId, role: 'assistant' });
+    await startAnswer(env.pool, msg.id);
+    expect(await failAnswer(env.pool, msg.id, 'stalled', 'gave up')).toBe(true);
+    const late = {
+      content: 'late',
+      answerable: true,
+      citations: [],
+      retrieval: null,
+      finishReason: 'end_turn',
+      model: 'fake',
+      usage: null,
+    };
+    expect(await completeAnswer(env.pool, msg.id, late)).toBe(false);
+    expect(await getMessage(env.pool, msg.id)).toMatchObject({ status: 'failed', content: '', errorCode: 'stalled' });
   });
 });

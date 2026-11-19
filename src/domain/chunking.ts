@@ -77,13 +77,42 @@ function splitLines(content: string): Line[] {
 const isBlank = (s: string) => /^\s*$/.test(s);
 const firstNonWs = (s: string) => s.search(/\S/);
 
-const ATX = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+// Every regex here runs on whole lines of untrusted input, so none may backtrack super-linearly: no two
+// adjacent quantifiers that can match the same characters (e.g. `[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$` is
+// quadratic on a long run of spaces). The ATX closing sequence and table separator rows are parsed by hand.
+const ATX_OPEN = /^ {0,3}(#{1,6})(?:[ \t]|$)/;
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
 const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 const THEMATIC = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
-const TABLE_SEP = /^ {0,3}\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*(?::?-+:?[ \t]*)?\|?[ \t]*$/;
+const TABLE_SEP_CHARS = /^ {0,3}[-|: \t]+$/;
+const TABLE_SEP_CELL = /^:?-+:?$/;
 const QUOTE = /^ {0,3}>[ \t]?/;
 const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+(?:\[[ xX]\][ \t]+)?|$)/;
+
+const isSpaceOrTab = (c: string | undefined) => c === ' ' || c === '\t';
+
+/** ATX heading text (closing `#` sequence and surrounding whitespace removed), or null when not a heading. */
+function atxHeading(raw: string): string | null {
+  const open = ATX_OPEN.exec(raw);
+  if (!open) return null;
+  let text = raw.slice(open[0].length).trimEnd();
+  let end = text.length;
+  while (end > 0 && text[end - 1] === '#') end--;
+  // A closing sequence is trailing `#`s that are the whole text or follow a space/tab.
+  if (end === 0) text = '';
+  else if (end < text.length && isSpaceOrTab(text[end - 1])) text = text.slice(0, end);
+  return text.trim();
+}
+
+/** GFM table delimiter row (`| --- | :-: |`): only pipes, dashes, colons and spaces, every cell `:?-+:?`. */
+function isTableSeparator(raw: string): boolean {
+  if (!TABLE_SEP_CHARS.test(raw)) return false;
+  let s = raw.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (!s.includes('|')) return false; // at least one cell must end in a pipe
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').every((cell) => TABLE_SEP_CELL.test(cell.trim()));
+}
 
 /** Scan markdown into content blocks plus a same-length masked copy of the content. */
 function scanMarkdown(content: string): { blocks: Block[]; masked: string } {
@@ -137,9 +166,9 @@ function scanMarkdown(content: string): { blocks: Block[]; masked: string } {
       flush();
       continue;
     }
-    const atx = ATX.exec(raw);
-    if (atx) {
-      setHeading((atx[2] ?? '').trim());
+    const atx = atxHeading(raw);
+    if (atx !== null) {
+      setHeading(atx);
       continue;
     }
     if (para && para.kind === 'plain' && !para.quoted && SETEXT.test(raw)) {
@@ -148,7 +177,7 @@ function scanMarkdown(content: string): { blocks: Block[]; masked: string } {
       setHeading(text);
       continue;
     }
-    if (THEMATIC.test(raw) || (raw.includes('|') && TABLE_SEP.test(raw))) {
+    if (THEMATIC.test(raw) || (raw.includes('|') && isTableSeparator(raw))) {
       flush();
       continue;
     }

@@ -1,18 +1,8 @@
+import type { Passage, Span } from '../domain/chunking.js';
 import type { Queryable } from './pool.js';
 
-/** Half-open `[start, end)` range in UTF-16 code units of `documents.content`. */
-export type Span = { start: number; end: number };
-
-/** What chunking produces; structurally matches the domain `Passage`. */
-export type NewPassage = {
-  ordinal: number;
-  start: number;
-  end: number;
-  heading: string | null;
-  sentences: Span[];
-  text: string;
-  tokenEstimate: number;
-};
+/** What chunking produces (the domain `Passage`), before it has a row id. */
+export type NewPassage = Passage;
 
 export type PassageRow = NewPassage & { id: string; documentId: string };
 

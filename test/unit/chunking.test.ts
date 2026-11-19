@@ -216,6 +216,31 @@ describe('chunkDocument — markdown edge cases', () => {
     expect(sentenceTexts(doc, passages)).toEqual(['Intro text.', 'a | b', '1 | 2']);
   });
 
+  it('parses ATX closing sequences and rejects non-headings', () => {
+    const doc = '# Closed ##\n\nOne.\n\n## Hash# \n\nTwo.\n\n### ##\n\nThree.\n\n####### seven\n\n#nospace\n';
+    // `### ##` is an empty heading (CommonMark); the `chunk` helper's simpler oracle reads it as "##".
+    const passages = chunkDocument(doc, 'markdown');
+    expect(passages.map((p) => p.heading)).toEqual(['Closed', 'Hash#', null]);
+    expect(sentenceTexts(doc, passages)).toEqual(['One.', 'Two.', 'Three.', '####### seven', '#nospace']);
+  });
+
+  it('chunks ~1 MB pathological lines in linear time (no regex backtracking)', () => {
+    const spaces = ' '.repeat(1_000_000);
+    const cases = [
+      `# a${spaces}x\n\nBody.\n`, // heading: closing-sequence detection used to be quadratic
+      `|-|${spaces}x\n\nBody.\n`, // table-separator check used to be quadratic
+      `---${spaces}x\n\nBody.\n`,
+      `- [ ]${spaces}x\n`,
+    ];
+    for (const doc of cases) {
+      const started = performance.now();
+      // chunkDocument directly: the `chunk` helper's invariant check uses a test-side regex.
+      const passages = chunkDocument(doc, 'markdown');
+      expect(performance.now() - started, JSON.stringify(doc.slice(0, 6))).toBeLessThan(2_000);
+      expect(passages.length).toBeGreaterThan(0);
+    }
+  });
+
   it('hard-splits a 5,000-char sentence at whitespace', () => {
     const words = Array.from({ length: 900 }, (_, i) => `word${i % 10}`).join(' ');
     const doc = `# Long\n\n${words.slice(0, 5000).trimEnd()}.\n`;

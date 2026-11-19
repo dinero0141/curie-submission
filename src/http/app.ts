@@ -25,6 +25,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     bodyLimit: deps.config.bodyLimitBytes,
   });
 
+  // JSON only: Fastify's default text/plain parser would turn a plain-text body into a 400 "not an object"
+  // instead of the documented 415.
+  app.removeContentTypeParser('text/plain');
+
   app.setErrorHandler((err, req, reply) => {
     const { error, internal } = toHttpError(err);
     if (internal) req.log.error({ err }, 'unhandled error');

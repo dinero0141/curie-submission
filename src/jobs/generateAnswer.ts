@@ -5,8 +5,10 @@
  * Final-state rule (same as prepare-document): the processor writes the terminal `failed` state itself,
  * immediately for permanent errors (`model_config_error`, `context_too_large`, `model_refused`; rethrown as
  * `UnrecoverableError`) and on the last attempt for retryable ones (`model_unavailable`). A retryable failure
- * before the last attempt puts the row back to `pending` for BullMQ's backoff. `max_tokens` is not an error:
- * the answer completes with `finish_reason = 'max_tokens'`. `worker.on('failed')` is only a logging backstop.
+ * before the last attempt puts the row back to `pending` for BullMQ's backoff. `max_tokens` with at least one
+ * verified citation completes with `finish_reason = 'max_tokens'`; without one it fails permanently with
+ * `answer_truncated` (it is not evidence that the document lacks the answer). `worker.on('failed')` is only
+ * a logging backstop.
  */
 import { UnrecoverableError, Worker, type Job } from 'bullmq';
 import type { Redis } from 'ioredis';
@@ -25,7 +27,7 @@ import {
 } from '../db/messages.js';
 import { getPassagesByOrdinals, listPassages, type PassageRow } from '../db/passages.js';
 import { listPassageIndex, searchPassages, type SearchOutcome } from '../db/search.js';
-import { resolveCitations } from '../domain/citations.js';
+import { NOT_FOUND_IN_SEARCHED_MESSAGE, resolveCitations } from '../domain/citations.js';
 import {
   RANKED_TOP_K,
   fitsFullContext,
@@ -33,11 +35,11 @@ import {
   selectPassages,
   type RetrievalResult,
 } from '../domain/retrieval.js';
-import { classifyError } from '../llm/errors.js';
+import { classifyError, type ClassifiedError } from '../llm/errors.js';
 import { buildRequest } from '../llm/prompt.js';
 import type { AnswerModel } from '../llm/types.js';
-import { isFinalAttempt } from './prepareDocument.js';
-import { QUEUE_NAMES, type GenerateAnswerJobData } from './queues.js';
+import { PartialWriter } from './partialWriter.js';
+import { isFinalAttempt, messageOf, QUEUE_NAMES, type GenerateAnswerJobData } from './queues.js';
 
 /** Default interval between partial `content` writes while an answer streams. */
 export const PARTIAL_WRITE_INTERVAL_MS = 400;
@@ -60,55 +62,22 @@ export class AnswerContextError extends Error {
   override readonly name = 'AnswerContextError';
 }
 
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message || err.name : String(err);
+/** The reply hit `max_tokens` before any citation survived verification. Permanent: a retry has the same budget. */
+export class AnswerTruncatedError extends Error {
+  override readonly name = 'AnswerTruncatedError';
+  constructor() {
+    super('the answer reached the max_tokens limit before it cited the document');
+  }
 }
 
-/**
- * Coalesces streamed text into at most one `content` write per interval. Writes run one at a time, in
- * order; `stop()` cancels the pending write and waits for the one in flight, so the final update always
- * lands after the last partial write. A failed partial write is logged and skipped (the final update is
- * what counts).
- */
-class PartialWriter {
-  private text = '';
-  private written = '';
-  private timer: NodeJS.Timeout | undefined;
-  private chain: Promise<void> = Promise.resolve();
-  private stopped = false;
+/** Stored for `internal_error`: the original text (SQL, constraint names, stack details) is only logged. */
+export const INTERNAL_ERROR_MESSAGE = 'internal error while generating the answer';
 
-  constructor(
-    private readonly write: (content: string) => Promise<unknown>,
-    private readonly intervalMs: number,
-    private readonly onError: (err: unknown) => void,
-  ) {}
-
-  append(delta: string): void {
-    if (this.stopped || delta === '') return;
-    this.text += delta;
-    this.timer ??= setTimeout(() => this.flush(), this.intervalMs);
-  }
-
-  private flush(): void {
-    this.timer = undefined;
-    const snapshot = this.text;
-    this.chain = this.chain.then(async () => {
-      if (this.stopped || snapshot === this.written) return;
-      try {
-        await this.write(snapshot);
-        this.written = snapshot;
-      } catch (err) {
-        this.onError(err);
-      }
-    });
-  }
-
-  async stop(): Promise<void> {
-    this.stopped = true;
-    clearTimeout(this.timer);
-    this.timer = undefined;
-    await this.chain;
-  }
+function classify(err: unknown): ClassifiedError | { code: 'answer_truncated'; retryable: false; message: string } {
+  if (err instanceof AnswerTruncatedError) return { code: 'answer_truncated', retryable: false, message: err.message };
+  if (err instanceof AnswerContextError) return { code: 'internal_error', retryable: false, message: INTERNAL_ERROR_MESSAGE };
+  const classified = classifyError(err);
+  return classified.code === 'internal_error' ? { ...classified, message: INTERNAL_ERROR_MESSAGE } : classified;
 }
 
 type AnswerContext = {
@@ -160,10 +129,8 @@ async function retrieve(
   const text = retrievalQueryText(ctx.question, ctx.previousQuestion);
   const search = await searchPassages(pool, ctx.documentId, text, RANKED_TOP_K);
   const chosen = selectPassages(index, opts, search.hits);
+  // A ready document's passages never change (they are replaced only while pending/processing).
   const rows = await getPassagesByOrdinals(pool, ctx.documentId, chosen.passages.map((p) => p.ordinal));
-  if (rows.length !== chosen.passages.length) {
-    throw new AnswerContextError(`passages of document ${ctx.documentId} changed during retrieval`);
-  }
   return { retrieval: { ...chosen, passages: rows }, search: { ...search, text } };
 }
 
@@ -205,8 +172,11 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
       }
 
       const resolved = resolveCitations(raw, request.documents, ctx.content);
+      if (resolved.notFoundReason === 'truncated') throw new AnswerTruncatedError();
+      // The model saw only part of a large document: "not found" must not read as "the document lacks it".
+      const text = !resolved.answerable && retrieval.mode !== 'full' ? NOT_FOUND_IN_SEARCHED_MESSAGE : resolved.text;
       const done = await completeAnswer(deps.pool, messageId, {
-        content: resolved.text,
+        content: text,
         answerable: resolved.answerable,
         citations: resolved.citations,
         retrieval: {
@@ -231,10 +201,8 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
       if (!done) return { outcome: 'skipped', reason: 'superseded' }; // e.g. the reconciler failed it meanwhile
       return { outcome: 'completed', answerable: resolved.answerable, citations: resolved.citations.length };
     } catch (err) {
-      const classified =
-        err instanceof AnswerContextError
-          ? { code: 'internal_error', retryable: false, message: err.message }
-          : classifyError(err);
+      const classified = classify(err);
+      if (classified.code === 'internal_error') deps.log?.error({ messageId, err }, 'internal error while generating an answer');
       const permanent = !classified.retryable;
       if (permanent || isFinalAttempt(job)) {
         try {

@@ -25,10 +25,7 @@ export type ClassifiedError = { code: ModelErrorCode; retryable: boolean; messag
 /** The model declined (`stop_reason: 'refusal'`). Thrown by the adapters so refusals flow through `classifyError`. */
 export class ModelRefusalError extends Error {
   override readonly name = 'ModelRefusalError';
-  constructor(
-    readonly category: string | null,
-    readonly partialText = '',
-  ) {
+  constructor(readonly category: string | null) {
     super(`model refused to answer${category ? ` (category: ${category})` : ''}`);
   }
 }
@@ -65,8 +62,7 @@ const result = (code: ModelErrorCode, retryable: boolean, err: unknown): Classif
 
 export function classifyError(err: unknown): ClassifiedError {
   if (err instanceof ModelRefusalError) return result('model_refused', false, err);
-  if (err instanceof ModelTimeoutError) return result('model_unavailable', true, err);
-  if (err instanceof Error && err.name === 'TimeoutError') return result('model_unavailable', true, err); // AbortSignal.timeout
+  if (err instanceof ModelTimeoutError) return result('model_unavailable', true, err); // AnthropicModel's deadline
 
   // Subclasses of APIError with no HTTP status: check before the status switch.
   if (err instanceof Anthropic.APIConnectionError) return result('model_unavailable', true, err); // incl. APIConnectionTimeoutError
@@ -82,13 +78,12 @@ export function classifyError(err: unknown): ClassifiedError {
       if (err.type && !RETRYABLE_TYPES.has(err.type)) return result('model_config_error', false, err);
       return result('model_unavailable', true, err);
     }
-    if (err instanceof Anthropic.RateLimitError || status === 429) return result('model_unavailable', true, err);
-    if (err instanceof Anthropic.InternalServerError || status >= 500) return result('model_unavailable', true, err); // 500, 503, 504, 529
-    if (status === 408 || status === 409) return result('model_unavailable', true, err); // SDK retries these by default too
-    if (err instanceof Anthropic.ContentTooLargeError || status === 413) return result('context_too_large', false, err);
-    if (err instanceof Anthropic.BadRequestError || status === 400) {
-      return result(PROMPT_TOO_LONG.test(err.message) ? 'context_too_large' : 'model_config_error', false, err);
+    // The SDK picks the error class from the status (`APIError.generate`), so the status alone decides.
+    if (status === 429 || status === 408 || status === 409 || status >= 500) {
+      return result('model_unavailable', true, err); // 500, 503, 504, 529; 408/409 are retried by the SDK by default too
     }
+    if (status === 413) return result('context_too_large', false, err);
+    if (status === 400) return result(PROMPT_TOO_LONG.test(err.message) ? 'context_too_large' : 'model_config_error', false, err);
     return result('model_config_error', false, err); // 401, 402, 403, 404, 422, ...
   }
 

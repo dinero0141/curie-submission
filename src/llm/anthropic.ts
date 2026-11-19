@@ -59,7 +59,7 @@ export function toRawAnswer(message: Anthropic.Message): RawAnswer {
     b.type === 'text' ? [{ text: b.text, citations: (b.citations ?? null) as readonly unknown[] | null }] : [],
   );
   if (message.stop_reason === 'refusal') {
-    throw new ModelRefusalError(message.stop_details?.category ?? null, blocks.map((b) => b.text).join(''));
+    throw new ModelRefusalError(message.stop_details?.category ?? null);
   }
   return { blocks, stopReason: message.stop_reason ?? 'unknown', usage: message.usage, model: message.model };
 }
@@ -75,7 +75,6 @@ export type AnthropicModelOptions = {
 };
 
 export class AnthropicModel implements AnswerModel {
-  readonly provider = 'anthropic';
   private readonly client: Anthropic;
 
   constructor(private readonly opts: AnthropicModelOptions) {

@@ -9,7 +9,8 @@ import { insertConversation } from '../../src/db/conversations.js';
 import { insertDocument } from '../../src/db/documents.js';
 import { getMessage, insertMessage } from '../../src/db/messages.js';
 import { listPassages } from '../../src/db/passages.js';
-import { buildOrQuery, listPassageIndex, searchPassages } from '../../src/db/search.js';
+import { listPassageIndex, searchPassages } from '../../src/db/search.js';
+import { NOT_FOUND_IN_SEARCHED_MESSAGE, NOT_FOUND_MESSAGE } from '../../src/domain/citations.js';
 import { RANKED_TOP_K, fitsFullContext, selectPassages } from '../../src/domain/retrieval.js';
 import { createGenerateAnswerProcessor } from '../../src/jobs/generateAnswer.js';
 import { createPrepareDocumentProcessor } from '../../src/jobs/prepareDocument.js';
@@ -131,9 +132,8 @@ describe('ranked retrieval over a large document', () => {
   });
 
   it('falls back to leading passages for a stopword-only question', async () => {
-    expect(await buildOrQuery(env.pool, 'What was it?')).toEqual({ tsquery: '', nodes: 0 });
     const { search, result } = await rankedFor('What was it?');
-    expect(search.hits).toEqual([]);
+    expect(search).toEqual({ tsquery: '', nodes: 0, hits: [] });
     expect(result.mode).toBe('fallback');
     expect(result.passages[0]!.ordinal).toBe(0);
     expect(result.hits).toEqual([]);
@@ -170,6 +170,7 @@ describe('sample document', () => {
 
 describe('generate-answer with ranked retrieval', () => {
   const fake = new FakeModel(); // default reply cites the first sentence of the first sent passage
+  fake.script({ match: 'mention whales', reply: { text: 'NOT_IN_DOCUMENT: no whales.' } });
 
   async function answer(conversationId: string, question: string, fullContextTokens = BUDGET) {
     await insertMessage(env.pool, { conversationId, role: 'user', content: question });
@@ -230,5 +231,14 @@ describe('generate-answer with ranked retrieval', () => {
     const retrieval = msg.retrieval as Record<string, any>;
     expect(retrieval).toMatchObject({ mode: 'full', hits: [], debug: { query: null } });
     expect(retrieval.passageIds).toHaveLength(passageCount);
+  });
+
+  it('says only the searched parts lacked the answer when the model saw part of the document', async () => {
+    const ranked = await answer((await insertConversation(env.pool, largeId)).id, 'Do the lenses mention whales?');
+    expect(ranked).toMatchObject({ status: 'completed', answerable: false, content: NOT_FOUND_IN_SEARCHED_MESSAGE });
+    expect((ranked.retrieval as Record<string, any>).mode).toBe('ranked');
+
+    const full = await answer((await insertConversation(env.pool, largeId)).id, 'Do the lenses mention whales?', 1_000_000);
+    expect(full).toMatchObject({ status: 'completed', answerable: false, content: NOT_FOUND_MESSAGE });
   });
 });

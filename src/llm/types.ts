@@ -24,8 +24,6 @@ export type AnswerRequest = {
 };
 
 export interface AnswerModel {
-  /** Provider name for logs (`anthropic`, `fake`). */
-  readonly provider: string;
   /**
    * Generate one answer. `onDelta` receives answer text as it streams (text blocks only). Rejects with an
    * error that `classifyError` understands; a refusal rejects with `ModelRefusalError`.

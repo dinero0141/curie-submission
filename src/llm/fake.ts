@@ -3,7 +3,8 @@
  *
  * - scripts match the question by case-insensitive substring (first match wins, newest script first);
  * - every request is recorded in `requests`;
- * - a script can fail its first attempts with given errors (`errors[n]` is thrown on attempt n + 1);
+ * - a script can fail its first attempts with given errors (`errors[n]` is thrown on attempt n + 1), before
+ *   streaming or, with `midStreamErrors`, after half of the text has streamed (and after the latch);
  * - a script can be latched: it streams the first half of its text, then waits until `release()`;
  * - unknown questions get a default answer citing the first sentence of the first passage.
  *
@@ -29,6 +30,8 @@ export type FakeScript = {
   errors?: unknown[];
   /** Hold the answer half-streamed until `release()` is called. */
   latch?: boolean;
+  /** Throw `errors` after the first half of the text has streamed (after the latch, if set), not before. */
+  midStreamErrors?: boolean;
 };
 
 type ScriptState = FakeScript & { attempts: number; gate: Gate | null };
@@ -83,7 +86,6 @@ export function defaultReply(req: AnswerRequest): { blocks: FakeBlock[] } {
 const MODEL_NAME = 'fake';
 
 export class FakeModel implements AnswerModel {
-  readonly provider = 'fake';
   /** Every request received, in call order. */
   readonly requests: AnswerRequest[] = [];
   private readonly scripts: ScriptState[] = [];
@@ -120,25 +122,30 @@ export class FakeModel implements AnswerModel {
     const s = this.scripts.find((x) => q.includes(x.match.toLowerCase()));
 
     const attempt = s ? s.attempts++ : 0;
-    if (s?.errors && attempt < s.errors.length) throw s.errors[attempt];
+    const failing = s?.errors !== undefined && attempt < s.errors.length;
+    if (failing && !s.midStreamErrors) throw s.errors![attempt];
 
     const reply = resolveReply(s?.reply, req);
     const text = reply.blocks.map((b) => b.text).join('');
+    const half = Math.floor(text.length / 2);
 
     if (s?.gate) {
-      const half = Math.floor(text.length / 2);
       if (half > 0) onDelta(text.slice(0, half));
       const wasOpen = s.gate.open;
       const waiting = s.gate.wait(signal);
       if (!wasOpen) for (const l of this.latchedListeners.splice(0)) l(req);
       await waiting;
+      if (failing) throw s.errors![attempt];
       if (text.length > half) onDelta(text.slice(half));
+    } else if (failing) {
+      if (half > 0) onDelta(text.slice(0, half));
+      throw s!.errors![attempt];
     } else {
       for (const b of reply.blocks) if (b.text) onDelta(b.text);
     }
 
     const stopReason = reply.stopReason ?? 'end_turn';
-    if (stopReason === 'refusal') throw new ModelRefusalError(null, text);
+    if (stopReason === 'refusal') throw new ModelRefusalError(null);
     return {
       blocks: reply.blocks.map((b) => ({ text: b.text, citations: b.citations ?? null })),
       stopReason,

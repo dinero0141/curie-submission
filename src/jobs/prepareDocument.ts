@@ -19,8 +19,8 @@ import {
 } from '../db/documents.js';
 import { replacePassages } from '../db/passages.js';
 import { withTx } from '../db/pool.js';
-import { ChunkingError, chunkDocument } from '../domain/chunking.js';
-import { QUEUE_NAMES, type PrepareDocumentJobData } from './queues.js';
+import { ChunkingError, chunkDocument, type Passage } from '../domain/chunking.js';
+import { isFinalAttempt, messageOf, QUEUE_NAMES, type PrepareDocumentJobData } from './queues.js';
 
 /**
  * Upper bound on passages per document. A 5 MB document of ~400-token passages is ~3,300 passages;
@@ -32,23 +32,14 @@ export type PrepareDocumentDeps = {
   pool: pg.Pool;
   passageTokens: number;
   maxPassages?: number;
-  /** Injectable for tests (transient-failure scenarios); defaults to `chunkDocument`. */
-  chunk?: typeof chunkDocument;
+  /** Injectable for tests (transient failures, races); defaults to `chunkDocument`. May be async. */
+  chunk?: (...args: Parameters<typeof chunkDocument>) => Passage[] | Promise<Passage[]>;
   log?: Pick<Logger, 'info' | 'warn' | 'error'>;
 };
 
 export type PrepareDocumentResult =
   | { outcome: 'ready'; passageCount: number }
   | { outcome: 'skipped'; reason: 'missing' | 'terminal' };
-
-/** True when this run is the job's last allowed attempt (`attemptsMade` counts finished attempts). */
-export function isFinalAttempt(job: Pick<Job, 'attemptsMade' | 'opts'>): boolean {
-  return job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
-}
-
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message || err.name : String(err);
-}
 
 export function createPrepareDocumentProcessor(deps: PrepareDocumentDeps) {
   const chunk = deps.chunk ?? chunkDocument;
@@ -67,7 +58,7 @@ export function createPrepareDocumentProcessor(deps: PrepareDocumentDeps) {
       const doc = await getDocument(deps.pool, documentId);
       if (!doc) return { outcome: 'skipped', reason: 'missing' };
 
-      const passages = chunk(doc.content, doc.format, { passageTokens: deps.passageTokens, maxPassages });
+      const passages = await chunk(doc.content, doc.format, { passageTokens: deps.passageTokens, maxPassages });
 
       return await withTx(deps.pool, async (tx) => {
         // Serialize with any concurrent run (or reconciler write) on the same row.

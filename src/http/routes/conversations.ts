@@ -10,10 +10,10 @@ import { getConversation, insertConversation, lockConversation, touchConversatio
 import { getDocumentSummary } from '../../db/documents.js';
 import { insertMessage, listMessages, ONE_INFLIGHT_ANSWER } from '../../db/messages.js';
 import { isUniqueViolation, withTx, type Queryable } from '../../db/pool.js';
-import { enqueueGenerateAnswer, settlesWithin } from '../../jobs/queues.js';
+import { enqueueGenerateAnswer, enqueueOrDefer } from '../../jobs/queues.js';
 import type { AppDeps } from '../app.js';
 import { HttpError, notFound } from '../errors.js';
-import { invalidRequest, parseId } from './documents.js';
+import { invalidRequest, isStorableText, parseId } from './documents.js';
 import { messageJson } from './messages.js';
 
 export const MAX_QUESTION_LENGTH = 2000;
@@ -22,7 +22,8 @@ const Question = z
   .string({ error: 'question must be a string' })
   .trim()
   .min(1, 'question must not be empty')
-  .max(MAX_QUESTION_LENGTH, `question must be at most ${MAX_QUESTION_LENGTH} characters`);
+  .max(MAX_QUESTION_LENGTH, `question must be at most ${MAX_QUESTION_LENGTH} characters`)
+  .refine(isStorableText, 'question must not contain NUL characters or unpaired UTF-16 surrogates');
 
 const CreateConversationBody = z.object({
   documentId: z.string({ error: 'documentId must be a string' }),
@@ -33,7 +34,10 @@ const AskBody = z.object({ question: Question });
 
 export type AskResult = { conversationId: string; userMessageId: string; assistantMessageId: string };
 
-/** Insert the question and a pending answer. The caller holds the conversation row lock in `tx`. */
+/**
+ * Insert the question and a pending answer. The caller holds the conversation row lock in `tx` (or created
+ * the conversation in `tx`, so no other transaction can see it yet).
+ */
 async function insertTurn(tx: Queryable, conversationId: string, question: string): Promise<AskResult> {
   const user = await insertMessage(tx, { conversationId, role: 'user', content: question });
   let assistant;
@@ -49,15 +53,15 @@ async function insertTurn(tx: Queryable, conversationId: string, question: strin
   return { conversationId, userMessageId: user.id, assistantMessageId: assistant.id };
 }
 
+/** Bounded: a slow or failed enqueue still answers 202; the reconciler enqueues stale pending answers. */
 async function enqueue(deps: AppDeps, log: FastifyBaseLogger, messageId: string): Promise<void> {
-  const enqueued = await settlesWithin(
+  await enqueueOrDefer(
     enqueueGenerateAnswer(deps.queues.generateAnswer, messageId),
     deps.enqueueTimeoutMs ?? 2_000,
+    log,
+    { messageId },
+    'generate-answer',
   );
-  if (!enqueued.ok) {
-    // The pending row is the source of truth; the reconciler enqueues stale pending answers.
-    log.warn({ messageId, err: enqueued.error }, 'generate-answer enqueue deferred to reconciler');
-  }
 }
 
 export function registerConversationRoutes(app: FastifyInstance, deps: AppDeps): void {
@@ -73,10 +77,10 @@ export function registerConversationRoutes(app: FastifyInstance, deps: AppDeps):
       throw new HttpError(409, 'document_not_ready', `document is ${detail}; wait until its status is ready`);
     }
 
-    // `ready` is terminal, so the check above cannot go stale before the insert.
+    // `ready` is terminal, so the check above cannot go stale before the insert. The new conversation is
+    // invisible to other transactions until COMMIT, so it needs no row lock.
     const result = await withTx(deps.pool, async (tx) => {
       const conversation = await insertConversation(tx, doc.id);
-      await lockConversation(tx, conversation.id);
       return insertTurn(tx, conversation.id, question);
     });
     await enqueue(deps, req.log, result.assistantMessageId);

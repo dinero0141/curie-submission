@@ -1,4 +1,5 @@
 /** API entrypoint: Fastify + queue producers. Long work is only enqueued here, never run. */
+import { pino } from 'pino';
 import { loadConfig } from './config.js';
 import { createPool } from './db/pool.js';
 import { buildApp } from './http/app.js';
@@ -8,11 +9,14 @@ import { loadEnvFile } from './loadEnv.js';
 // First statement: the modules above only read the environment when called.
 loadEnvFile();
 
+const level = process.env.LOG_LEVEL ?? 'info';
+// Connection-level errors (Redis outage, idle Postgres client) are logged here, not per request.
+const infraLog = pino({ name: 'api', level });
 const config = loadConfig();
-const pool = createPool(config.databaseUrl);
-const redis = createRedisConnection(config.redisUrl);
+const pool = createPool(config.databaseUrl, { log: infraLog });
+const redis = createRedisConnection(config.redisUrl, infraLog);
 const queues = createQueues(redis);
-const app = buildApp({ pool, config, queues, logger: { level: process.env.LOG_LEVEL ?? 'info' } });
+const app = buildApp({ pool, config, queues, logger: { level } });
 
 let closing = false;
 async function shutdown(signal: string): Promise<void> {

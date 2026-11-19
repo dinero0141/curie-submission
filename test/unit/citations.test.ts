@@ -213,11 +213,11 @@ describe('resolveCitations — verification and dropping', () => {
     ]);
   });
 
-  it('drops a citation when the block we sent no longer equals content.slice(span)', () => {
-    const tampered = docs.map((d, i) => (i === results ? { ...d, blocks: d.blocks.map((b, j) => (j === 1 ? b + ' ' : b)) } : d));
-    const r = resolveCitations(answer({ text: 'x', citations: [cite(docs, results, 1, 2)] }), tampered, content);
-    expect(r.dropped.map((d) => d.reason)).toEqual(['sent_text_mismatch']);
-    expect(r.answerable).toBe(false);
+  it('quotes the Markdown syntax between cited sentences of different blocks (one contiguous slice)', () => {
+    const md = '# List\n\n- First item.\n- Second item.\n';
+    const { docs: d } = setup(md);
+    const r = resolveCitations(answer({ text: 'Both.', citations: [cite(d, 0, 0, 2)] }), d, md);
+    expect(r.citations[0]!.quote).toBe('First item.\n- Second item.');
   });
 
   it('stays answerable when at least one citation survives', () => {
@@ -259,6 +259,17 @@ describe('resolveCitations — not answerable', () => {
     );
     expect(r).toMatchObject({ answerable: false, text: NOT_FOUND_MESSAGE, citations: [], notFoundReason: 'no_verified_citations' });
     expect(r.dropped.map((d) => d.reason)).toEqual(['cited_text_mismatch', 'document_out_of_range']);
+  });
+
+  it('reports a max_tokens reply with no surviving citation as truncated, not as not-in-document', () => {
+    const cut = { ...answer({ text: 'The hybrid prototype found a relevant' }), stopReason: 'max_tokens' };
+    expect(resolveCitations(cut, docs, content)).toMatchObject({ answerable: false, citations: [], notFoundReason: 'truncated' });
+
+    // A cut answer that already carries a verified citation stays answerable; an explicit marker stays not-found.
+    const cited = { ...answer({ text: 'Claim', citations: [cite(docs, results, 0, 1)] }), stopReason: 'max_tokens' };
+    expect(resolveCitations(cited, docs, content)).toMatchObject({ answerable: true, notFoundReason: null });
+    const marker = { ...answer({ text: `${NOT_IN_DOCUMENT_MARKER} no` }), stopReason: 'max_tokens' };
+    expect(resolveCitations(marker, docs, content).notFoundReason).toBe('not_in_document');
   });
 
   it('treats an empty reply as not answerable', () => {

@@ -14,11 +14,11 @@
  * `numnode(q) = 0` (stopword-only or empty question) means there is nothing to search for: the caller falls
  * back to leading passages. Hits are ranked by `ts_rank_cd` (cover density), ties by document order.
  */
-import type { RankedHit } from '../domain/retrieval.js';
+import type { RankedHit, RetrievablePassage } from '../domain/retrieval.js';
 import type { Queryable } from './pool.js';
 
 /** Light passage listing for retrieval decisions (no text). */
-export type PassageIndexRow = { id: string; ordinal: number; tokenEstimate: number };
+export type PassageIndexRow = RetrievablePassage;
 
 export type PassageHit = RankedHit & { id: string };
 
@@ -44,42 +44,36 @@ export async function listPassageIndex(q: Queryable, documentId: string): Promis
   }));
 }
 
-/** The OR tsquery for `text` (see module comment) and its node count. */
-export async function buildOrQuery(q: Queryable, text: string): Promise<{ tsquery: string; nodes: number }> {
-  const res = await q.query(
-    `WITH x AS (SELECT to_tsquery('simple', replace(plainto_tsquery('english', $1)::text, ' & ', ' | ')) AS q)
-     SELECT q::text AS tsquery, numnode(q) AS nodes FROM x`,
-    [text],
-  );
-  const row = res.rows[0] as { tsquery: string; nodes: number };
-  return { tsquery: row.tsquery, nodes: row.nodes };
-}
-
+/** Build the OR query and search with it in one statement (one row with no passage when nothing matches). */
 export async function searchPassages(
   q: Queryable,
   documentId: string,
   text: string,
   limit: number,
 ): Promise<SearchOutcome> {
-  const { tsquery, nodes } = await buildOrQuery(q, text);
-  if (nodes === 0) return { tsquery, nodes, hits: [] };
-  // `$2::tsquery` is the query built above, passed back as text: the cast parses tsquery syntax without
-  // any text-search config, so the lexemes are used exactly as built.
   const res = await q.query(
-    `SELECT id, ordinal, ts_rank_cd(tsv, $2::tsquery) AS score
-       FROM passages
-      WHERE document_id = $1 AND tsv @@ $2::tsquery
-      ORDER BY score DESC, ordinal
-      LIMIT $3`,
-    [documentId, tsquery, limit],
+    `WITH x AS (SELECT to_tsquery('simple', replace(plainto_tsquery('english', $2)::text, ' & ', ' | ')) AS q)
+     SELECT x.q::text AS tsquery, numnode(x.q) AS nodes, p.id, p.ordinal, p.score
+       FROM x
+       LEFT JOIN LATERAL (
+         SELECT id, ordinal, ts_rank_cd(tsv, x.q) AS score
+           FROM passages
+          WHERE document_id = $1 AND numnode(x.q) > 0 AND tsv @@ x.q
+          ORDER BY score DESC, ordinal
+          LIMIT $3
+       ) p ON true`,
+    [documentId, text, limit],
   );
+  const first = res.rows[0] as { tsquery: string; nodes: number };
   return {
-    tsquery,
-    nodes,
-    hits: res.rows.map((r: Record<string, unknown>) => ({
-      id: r.id as string,
-      ordinal: r.ordinal as number,
-      score: Number(r.score),
-    })),
+    tsquery: first.tsquery,
+    nodes: first.nodes,
+    hits: res.rows
+      .filter((r: Record<string, unknown>) => r.id !== null)
+      .map((r: Record<string, unknown>) => ({
+        id: r.id as string,
+        ordinal: r.ordinal as number,
+        score: Number(r.score),
+      })),
   };
 }

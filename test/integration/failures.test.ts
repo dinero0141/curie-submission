@@ -12,9 +12,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { insertConversation } from '../../src/db/conversations.js';
 import { getDocumentSummary, insertDocument, markDocumentProcessing } from '../../src/db/documents.js';
-import { getMessage, insertMessage, startAnswer } from '../../src/db/messages.js';
+import { failAnswer, getMessage, insertMessage, startAnswer } from '../../src/db/messages.js';
 import { buildApp } from '../../src/http/app.js';
-import { createGenerateAnswerProcessor, createGenerateAnswerWorker } from '../../src/jobs/generateAnswer.js';
+import {
+  createGenerateAnswerProcessor,
+  createGenerateAnswerWorker,
+  INTERNAL_ERROR_MESSAGE,
+} from '../../src/jobs/generateAnswer.js';
 import { createPrepareDocumentWorker } from '../../src/jobs/prepareDocument.js';
 import {
   closeQueues,
@@ -49,7 +53,8 @@ fake.script({
   match: 'huge prompt',
   errors: [apiError(400, 'invalid_request_error', 'prompt is too long: 1234567 tokens > 1000000 maximum')],
 });
-fake.script({ match: 'please refuse', reply: { text: 'I will not help with that.', stopReason: 'refusal' } });
+// Latched: half the text streams (and is written as partial content) before the refusal.
+fake.script({ match: 'please refuse', latch: true, reply: { text: 'I will not help with that.', stopReason: 'refusal' } });
 fake.script({
   match: 'truncated answer',
   reply: (req) => ({
@@ -57,7 +62,10 @@ fake.script({
     stopReason: 'max_tokens',
   }),
 });
-fake.script({ match: 'retry later', errors: [overloaded()] });
+fake.script({ match: 'cut before citing', reply: { text: 'The prototype found a relevant', stopReason: 'max_tokens' } });
+// First attempt streams half its text, waits at the latch, then fails with a 529.
+fake.script({ match: 'retry later', errors: [overloaded()], latch: true, midStreamErrors: true });
+fake.script({ match: 'superseded meanwhile', latch: true });
 
 let redis: Redis;
 let queues: Queues;
@@ -100,6 +108,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  fake.release();
   await Promise.all((workers ?? []).map((w) => w.close()));
   await app?.close();
   if (queues) await closeQueues(queues);
@@ -207,7 +216,14 @@ describe('generate-answer final-state rule', () => {
   });
 
   it('fails a refusal permanently (model_refused) without keeping the partial text', async () => {
-    const { ids, answer } = await answerOf('Would you please refuse?');
+    const latched = fake.whenLatched();
+    const ids = await start('Would you please refuse?');
+    await latched;
+    const partial = await poll(`/messages/${ids.assistantMessageId}`, (b) => b.content !== '');
+    expect(partial.status).toBe('streaming');
+    fake.release('please refuse');
+
+    const answer = await poll(`/messages/${ids.assistantMessageId}`, terminal);
     expect(answer).toMatchObject({ status: 'failed', attempts: 1, content: '', error: { code: 'model_refused' } });
     expect(attemptsSeen.get(ids.assistantMessageId)).toEqual([0]);
   });
@@ -224,17 +240,98 @@ describe('generate-answer final-state rule', () => {
     expect(answer.citations).toHaveLength(1);
   });
 
-  it('puts a row back to pending without partial content between retries', async () => {
-    // Drive the processor directly (no worker) to observe the state between attempts deterministically.
-    const { messageId } = await seedTurn('Retry later please?');
-    const processor = createGenerateAnswerProcessor({ pool: env.pool, model: fake, fullContextTokens: 60_000 });
-    const job = (attemptsMade: number) => ({ id: messageId, data: { messageId }, attemptsMade, opts: { attempts: ATTEMPTS } });
+  it('fails a max_tokens reply without a verified citation as answer_truncated, not as not-found', async () => {
+    const { ids, answer } = await answerOf('Was it cut before citing?');
+    expect(answer).toMatchObject({
+      status: 'failed',
+      answerable: null,
+      content: '',
+      attempts: 1,
+      error: { code: 'answer_truncated', message: expect.stringContaining('max_tokens') },
+    });
+    const job = await queues.generateAnswer.getJob(ids.assistantMessageId);
+    expect(await job!.getState()).toBe('failed');
+  });
 
-    await expect(processor(job(0))).rejects.toBeInstanceOf(Anthropic.InternalServerError);
+  /** Drive the processor directly (no worker, no job) to observe row state deterministically. */
+  const directProcessor = () =>
+    createGenerateAnswerProcessor({ pool: env.pool, model: fake, fullContextTokens: 60_000, partialWriteMs: 10 });
+  const directJob = (messageId: string, attemptsMade = 0) => ({
+    id: messageId,
+    data: { messageId },
+    attemptsMade,
+    opts: { attempts: ATTEMPTS },
+  });
+
+  async function waitForRow(messageId: string, done: (row: Body) => boolean): Promise<Body> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const row = (await getMessage(env.pool, messageId)) as Body;
+      if (done(row)) return row;
+      if (Date.now() > deadline) throw new Error(`message ${messageId}: ${JSON.stringify(row)}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  it('puts a row back to pending without partial content between retries', async () => {
+    const { messageId } = await seedTurn('Retry later please?');
+    const processor = directProcessor();
+
+    const latched = fake.whenLatched();
+    const first = processor(directJob(messageId, 0));
+    await latched;
+    // The failed attempt's partial text was visible while it streamed...
+    expect(await waitForRow(messageId, (r) => r.content !== '')).toMatchObject({ status: 'streaming' });
+    fake.release('retry later');
+    await expect(first).rejects.toBeInstanceOf(Anthropic.InternalServerError);
+    // ...and is gone during the backoff.
     expect(await getMessage(env.pool, messageId)).toMatchObject({ status: 'pending', content: '', attempts: 1, errorCode: null });
 
-    await expect(processor(job(1))).resolves.toMatchObject({ outcome: 'completed' });
+    await expect(processor(directJob(messageId, 1))).resolves.toMatchObject({ outcome: 'completed' });
     expect(await getMessage(env.pool, messageId)).toMatchObject({ status: 'completed', attempts: 2 });
+  });
+
+  it('does not reopen a row that was failed while the model was still generating (superseded)', async () => {
+    const { messageId } = await seedTurn('Was this superseded meanwhile?');
+    const latched = fake.whenLatched();
+    const running = directProcessor()(directJob(messageId));
+    await latched;
+    await waitForRow(messageId, (r) => r.content !== '');
+
+    // The reconciler (or anything else) fails the row mid-generation.
+    expect(await failAnswer(env.pool, messageId, STALLED, 'gave up')).toBe(true);
+    fake.release('superseded meanwhile');
+
+    await expect(running).resolves.toEqual({ outcome: 'skipped', reason: 'superseded' });
+    expect(await getMessage(env.pool, messageId)).toMatchObject({ status: 'failed', errorCode: STALLED, content: '', answerable: null });
+  });
+
+  it('fails permanently with internal_error when no question precedes the answer', async () => {
+    const convo = await insertConversation(env.pool, docId);
+    const orphan = await insertMessage(env.pool, { conversationId: convo.id, role: 'assistant' }); // seq 1
+    await expect(directProcessor()(directJob(orphan.id))).rejects.toBeInstanceOf(UnrecoverableError);
+    // The stored message is generic; the details are only logged.
+    expect(await getMessage(env.pool, orphan.id)).toMatchObject({
+      status: 'failed',
+      attempts: 1,
+      errorCode: 'internal_error',
+      errorMessage: INTERNAL_ERROR_MESSAGE,
+    });
+  });
+
+  it('fails permanently with internal_error when the document is not ready', async () => {
+    const pending = await insertDocument(env.pool, { title: 'not ready', format: 'text', content: 'Later.' });
+    const convo = await insertConversation(env.pool, pending.id);
+    await insertMessage(env.pool, { conversationId: convo.id, role: 'user', content: 'Anything?' });
+    const assistant = await insertMessage(env.pool, { conversationId: convo.id, role: 'assistant' });
+    await expect(directProcessor()(directJob(assistant.id))).rejects.toBeInstanceOf(UnrecoverableError);
+    expect(await getMessage(env.pool, assistant.id)).toMatchObject({ status: 'failed', attempts: 1, errorCode: 'internal_error' });
+  });
+
+  it('skips a job whose message does not exist', async () => {
+    // Deleting a conversation cascades to its messages, so a vanished conversation looks like this too.
+    const ghost = '00000000-0000-4000-8000-000000000000';
+    await expect(directProcessor()(directJob(ghost))).resolves.toEqual({ outcome: 'skipped', reason: 'terminal' });
   });
 });
 
@@ -289,14 +386,24 @@ describe('reconciler', () => {
     expect(answer).toMatchObject({ status: 'completed', answerable: true, attempts: 1 });
   });
 
+  /** Cleanup that runs even when an assertion fails: no in-flight row or delayed job is left behind. */
+  async function retire(messageId: string) {
+    await (await orphanQueues.generateAnswer.getJob(messageId))?.remove();
+    await env.pool.query(`UPDATE messages SET status = 'failed' WHERE id = $1 AND status IN ('pending', 'streaming')`, [
+      messageId,
+    ]);
+  }
+
   it('leaves fresh in-flight rows alone', async () => {
     const { messageId } = await seedTurn('A fresh question?');
-    const report = await createReconciler({ pool: env.pool, queues: orphanQueues }).runOnce();
-    expect(Object.values(report!.answers).flat()).not.toContain(messageId);
-    expect(await orphanQueues.generateAnswer.getJob(messageId)).toBeUndefined();
-    expect((await getMessage(env.pool, messageId))!.status).toBe('pending');
-    // Clean up so the conversation does not keep an in-flight answer.
-    await env.pool.query(`UPDATE messages SET status = 'failed' WHERE id = $1`, [messageId]);
+    try {
+      const report = await createReconciler({ pool: env.pool, queues: orphanQueues }).runOnce();
+      expect(Object.values(report!.answers).flat()).not.toContain(messageId);
+      expect(await orphanQueues.generateAnswer.getJob(messageId)).toBeUndefined();
+      expect((await getMessage(env.pool, messageId))!.status).toBe('pending');
+    } finally {
+      await retire(messageId);
+    }
   });
 
   it('fails a stale streaming answer whose job is in the failed set, and the conversation accepts a new question', async () => {
@@ -329,14 +436,16 @@ describe('reconciler', () => {
 
   it('leaves a stale row whose job is still waiting or delayed', async () => {
     const { messageId } = await seedTurn('Delayed job?');
-    await orphanQueues.generateAnswer.add('delayed', { messageId }, { jobId: messageId, delay: 60_000 });
-    await age('messages', messageId);
+    try {
+      await orphanQueues.generateAnswer.add('delayed', { messageId }, { jobId: messageId, delay: 60_000 });
+      await age('messages', messageId);
 
-    const report = await createReconciler({ pool: env.pool, queues: orphanQueues }).runOnce();
-    expect(report!.answers.left).toContain(messageId);
-    expect((await getMessage(env.pool, messageId))!.status).toBe('pending');
-    await (await orphanQueues.generateAnswer.getJob(messageId))!.remove();
-    await env.pool.query(`UPDATE messages SET status = 'failed' WHERE id = $1`, [messageId]);
+      const report = await createReconciler({ pool: env.pool, queues: orphanQueues }).runOnce();
+      expect(report!.answers.left).toContain(messageId);
+      expect((await getMessage(env.pool, messageId))!.status).toBe('pending');
+    } finally {
+      await retire(messageId);
+    }
   });
 
   it('enqueues a stale pending document with no job, and it becomes ready', async () => {
@@ -362,14 +471,17 @@ describe('reconciler', () => {
 
   it('runs on start and on its interval until stopped', async () => {
     const reconciler = createReconciler({ pool: env.pool, queues, intervalMs: 30 });
-    reconciler.start();
-    await reconciler.runOnce(); // joins the pass started by start()
+    try {
+      reconciler.start();
+      await reconciler.runOnce(); // joins the pass started by start()
 
-    // Lost after the first pass: picked up by a later interval tick.
-    const { messageId } = await seedTurn('How many questions did the hybrid prototype get right?');
-    await age('messages', messageId);
-    const answer = await poll(`/messages/${messageId}`, terminal);
-    expect(answer.status).toBe('completed');
-    await reconciler.stop();
+      // Lost after the first pass: picked up by a later interval tick.
+      const { messageId } = await seedTurn('How many questions did the hybrid prototype get right?');
+      await age('messages', messageId);
+      const answer = await poll(`/messages/${messageId}`, terminal);
+      expect(answer.status).toBe('completed');
+    } finally {
+      await reconciler.stop();
+    }
   });
 });

@@ -6,9 +6,8 @@ import type { AnswerModel } from './types.js';
 
 export function createAnswerModel(config: Config): AnswerModel {
   if (config.modelProvider === 'fake') return new FakeModel();
-  if (!config.anthropicApiKey) throw new Error('ANTHROPIC_API_KEY is required when MODEL_PROVIDER=anthropic');
   return new AnthropicModel({
-    apiKey: config.anthropicApiKey,
+    apiKey: config.anthropicApiKey!, // loadConfig refuses MODEL_PROVIDER=anthropic without a key
     model: config.anthropicModel,
     maxAnswerTokens: config.maxAnswerTokens,
     timeoutMs: config.modelTimeoutMs,

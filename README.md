@@ -8,23 +8,44 @@ text while the answer is generated.
 - Design and decisions: [DESIGN.md](DESIGN.md)
 - Integration spec (endpoints, shapes, statuses, errors): [docs/API.md](docs/API.md)
 - Agent rules used to build it: [CLAUDE.md](CLAUDE.md)
-- Recording: TBD
+- Recording: **pending** (link to be added before submission; tracked in
+  [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining))
 - Status: complete and tested end to end with a fake model, but **built without an Anthropic API key**: no real
   Claude call has been made. See [Verification status](#verification-status) and
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
-- Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–~18:22 by commit times; the task
-  agents themselves reported ~4 h 45), plus brainstorm/planning before that and review after. Breakdown in
+- Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–18:20 by commit times; the task
+  agents themselves reported ~4 h 45), plus brainstorm/planning before that and code review after (total session
+  time was not recorded). Breakdown in
   [DESIGN.md § Implementation plan and time log](DESIGN.md#implementation-plan-and-time-log).
 
 ## Requirements
 
-Docker (with Compose), Node 22, pnpm (only for local development and tests). `jq` for the example flow.
+Docker (with Compose), Node 22, pnpm 12 (12.21.0 wrote the lockfile and is pinned in the `Dockerfile`; older pnpm
+may mishandle the `allowBuilds` list in `pnpm-workspace.yaml`) for local development and tests. `jq` for the
+example flow.
 
 ## Run with Docker Compose
 
 ```sh
-cp .env.example .env     # optional; then set ANTHROPIC_API_KEY, or MODEL_PROVIDER=fake
 docker compose up --build
+```
+
+With no `.env` file this runs keyless with the fake model. To use Claude, create a repo-root `.env` first (copy
+`.env.example` if your checkout has it, or this block) and fill in the key:
+
+```sh
+MODEL_PROVIDER=anthropic
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-sonnet-5-5
+DATABASE_URL=postgres://curie:curie@localhost:54329/curie
+REDIS_URL=redis://localhost:63799
+PORT=3000
+MAX_ANSWER_TOKENS=1024
+MODEL_TIMEOUT_MS=90000
+FULL_CONTEXT_TOKENS=60000
+PASSAGE_TOKENS=400
+MAX_DOCUMENT_BYTES=5242880
+LOG_LEVEL=info
 ```
 
 This starts Postgres 16, Redis 7, a one-shot `migrate`, the API on http://localhost:3000 and the worker. Host ports:
@@ -38,15 +59,28 @@ Stop everything with `docker compose down` (add `-v` to drop the database volume
 |---|---|---|
 | `MODEL_PROVIDER` | `anthropic` in the app; **`fake` under compose** | `anthropic` = Claude via the Messages API with Citations; `fake` = scripted demo model, no network |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_PROVIDER=anthropic` (the app refuses to start without it) |
-| `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | Any Claude model that supports Citations |
+| `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | The request shape (Citations, adaptive thinking, `output_config.effort`) is assumed for the default model. Another model must accept all three; unverified (keyless build) |
 | `MAX_ANSWER_TOKENS` | `1024` | Answer budget; the request adds 4096 tokens of thinking headroom |
 | `MODEL_TIMEOUT_MS` | `90000` | Deadline for one streamed answer; a timeout is retried |
 | `FULL_CONTEXT_TOKENS` | `60000` | Documents up to this estimated size are sent whole |
 | `PASSAGE_TOKENS` | `400` | Target passage size |
 | `MAX_DOCUMENT_BYTES` | `5242880` | Upload limit (UTF-8 bytes of `content`) |
 
-`.env.example` lists every variable without credentials and sets `MODEL_PROVIDER=anthropic`, so after copying it
-either fill in `ANTHROPIC_API_KEY` or change the provider to `fake`. Compose resolves `MODEL_PROVIDER` as shell >
+Infrastructure and tooling:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DATABASE_URL` | `postgres://curie:curie@localhost:54329/curie` | Postgres; compose sets the in-network URL itself |
+| `REDIS_URL` | `redis://localhost:63799` | Redis (BullMQ); compose sets the in-network URL itself |
+| `PORT` | `3000` | API listen port (inside compose always 3000) |
+| `API_PORT` | `3000` | Compose only: host port mapped to the API |
+| `LOG_LEVEL` | `info` | pino level for the API and the worker (`debug` for more) |
+| `TEST_DATABASE_URL` / `TEST_REDIS_URL` | `…/curie_test` on 54329 / `redis://localhost:63799` | Integration tests only |
+| `EVAL_BASE_URL` / `EVAL_VERBOSE` | `http://localhost:3000` / unset | `pnpm eval` only |
+
+The block above (and `.env.example`) lists the variables without credentials and sets `MODEL_PROVIDER=anthropic`,
+so either fill in `ANTHROPIC_API_KEY` or change the provider to `fake`. A `.env` file is only needed for the
+anthropic provider. Compose resolves `MODEL_PROVIDER` as shell >
 `.env` > `fake` (`docker-compose.yml`), so with no `.env` at all the stack runs keyless with the fake model, and the
 worker logs a warning saying so. Inside compose, `DATABASE_URL`/`REDIS_URL` are always
 the in-network addresses; the `.env` values are for local runs.
@@ -117,7 +151,7 @@ jq slices by code point, not UTF-16 unit; that is the same for this ASCII sample
 
 **Not found.** A question the document does not answer (e.g. "Who funded the study?") completes with
 `"answerable": false`, `"citations": []` and `"content": "I could not find an answer to this question in the
-document."`. With the fake model this outcome is only reachable through scripted tests
+document."` (for a document too large to send whole, the message says only the searched parts were checked). With the fake model this outcome is only reachable through scripted tests
 (`test/integration/conversations.test.ts`); it has not been seen with real Claude (see below).
 
 More responses (errors, 404s, a failed document) are in [docs/notes/manual-checks.md](docs/notes/manual-checks.md)
@@ -148,8 +182,8 @@ pnpm typecheck
 ```
 
 Integration tests use the `curie_test` database (created on first Postgres volume init) and fail fast with a hint if
-Postgres or Redis is down. All tests use the fake model. Current result: 222 tests in 16 files pass (140 unit,
-82 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
+Postgres or Redis is down. All tests use the fake model. Current result: 252 tests in 18 files pass (152 unit,
+100 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
 
 `pnpm spike` (`scripts/spike-citations.ts`) dumps raw Citations responses for the sample document and needs an
 Anthropic key.
@@ -181,7 +215,7 @@ the eval does not cover `ranked` retrieval.
 This build had **no Anthropic API key** (a deliberate decision to continue keyless). So:
 
 Verified:
-- `pnpm typecheck` and `pnpm test`: 222/222 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
+- `pnpm typecheck` and `pnpm test`: 252/252 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
   workers in the integration tests.
 - The example flow above, over HTTP against the compose stack with `MODEL_PROVIDER=fake`: upload → ready → ask →
   poll → follow-up → offsets slice the stored content; plus 400/404/409/415 responses and a failed document

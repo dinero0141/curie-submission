@@ -5,13 +5,15 @@
  * claude-api skill and the `@anthropic-ai/sdk` 1.10.0 types) and were NOT observed live. The code is written
  * so that a wrong assumption can only drop a citation, never produce a wrong quote:
  * - only `content_block_location` citations are accepted; indices must be integers inside what we sent;
- * - each cited block is compared with the text we sent for that block, which must be exactly
- *   `content.slice(span)`;
  * - `cited_text` must equal the cited blocks joined, compared with all whitespace removed (the separator is
- *   undocumented). It is never used as the quote. If the index semantics were different from what we assume
- *   (say `end_block_index` inclusive, or 1-based), `cited_text` would cover other blocks and the citation is
- *   dropped;
- * - the quote is always `content.slice(startOffset, endOffset)` built from our stored sentence spans.
+ *   undocumented). This is the check that tests the model's output: if the index semantics were different
+ *   from what we assume (say `end_block_index` inclusive, or 1-based), `cited_text` would cover other blocks
+ *   and the citation is dropped. It is never used as the quote. Remaining gap: an off-by-one index that lands
+ *   on an identical repeated sentence passes, with the right quote text but the other sentence's offsets;
+ * - the quote is always `content.slice(startOffset, endOffset)` built from our stored sentence spans (the
+ *   blocks we sent are those same slices, built by `toSentDocument`). A quote spanning several sentences is
+ *   one contiguous slice, so it includes any Markdown syntax between them (list or quote markers, a table
+ *   pipe row) that was masked out of the sentence blocks.
  *
  * Pure, no I/O.
  */
@@ -22,6 +24,13 @@ export const NOT_IN_DOCUMENT_MARKER = 'NOT_IN_DOCUMENT:';
 
 /** Displayed text when an answer is not grounded in the document. */
 export const NOT_FOUND_MESSAGE = 'I could not find an answer to this question in the document.';
+
+/**
+ * Displayed instead of `NOT_FOUND_MESSAGE` when the model saw only part of a large document (`ranked` or
+ * `fallback` retrieval), so "not found" cannot mean "the document does not say".
+ */
+export const NOT_FOUND_IN_SEARCHED_MESSAGE =
+  'I could not find an answer to this question in the parts of the document that were searched.';
 
 /**
  * One citation as received from the model. Deliberately `unknown`: the shape is assumed, not verified, so
@@ -65,7 +74,6 @@ export type DropReason =
   | 'unsupported_type'
   | 'document_out_of_range'
   | 'block_out_of_range'
-  | 'sent_text_mismatch'
   | 'cited_text_missing'
   | 'cited_text_mismatch';
 
@@ -84,7 +92,11 @@ export type ResolvedAnswer = {
   dropped: DroppedCitation[];
   /** The model's text blocks concatenated, kept for debugging. */
   rawText: string;
-  notFoundReason: 'not_in_document' | 'no_verified_citations' | null;
+  /**
+   * Why `answerable` is false. `truncated`: the reply hit `max_tokens` before any citation survived, so
+   * nothing can be said about the document (the processor fails the answer with `answer_truncated`).
+   */
+  notFoundReason: 'not_in_document' | 'no_verified_citations' | 'truncated' | null;
 };
 
 /** Build the document we send for a passage: the block texts are exact slices of the content. */
@@ -116,13 +128,9 @@ function locate(c: RawCitation, sent: SentDocument[], content: string): Located 
 
   const start = r.start_block_index;
   const end = r.end_block_index; // exclusive (assumed; checked against cited_text below)
-  if (!isIndex(start) || !isIndex(end) || start < 0 || end <= start || end > doc.blocks.length || end > doc.sentences.length) {
+  // `blocks` and `sentences` have the same length (`toSentDocument`).
+  if (!isIndex(start) || !isIndex(end) || start < 0 || end <= start || end > doc.sentences.length) {
     return 'block_out_of_range';
-  }
-
-  for (let i = start; i < end; i++) {
-    const span = doc.sentences[i]!;
-    if (doc.blocks[i] !== content.slice(span.start, span.end)) return 'sent_text_mismatch';
   }
 
   if (typeof r.cited_text !== 'string') return 'cited_text_missing';
@@ -136,7 +144,8 @@ function locate(c: RawCitation, sent: SentDocument[], content: string): Located 
 /**
  * Map the model's citations to verified source quotations and decide whether the answer is grounded.
  * Not answerable when the reply starts with `NOT_IN_DOCUMENT_MARKER` (after leading whitespace) or when no
- * citation survives verification.
+ * citation survives verification; in the second case a `max_tokens` stop is reported as `truncated`, not as
+ * "not in the document".
  */
 export function resolveCitations(raw: RawAnswer, sent: SentDocument[], content: string): ResolvedAnswer {
   const citations: Citation[] = [];
@@ -171,7 +180,9 @@ export function resolveCitations(raw: RawAnswer, sent: SentDocument[], content: 
   const notFoundReason = rawText.trimStart().startsWith(NOT_IN_DOCUMENT_MARKER)
     ? 'not_in_document'
     : citations.length === 0
-      ? 'no_verified_citations'
+      ? raw.stopReason === 'max_tokens'
+        ? 'truncated'
+        : 'no_verified_citations'
       : null;
 
   if (notFoundReason) {

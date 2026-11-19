@@ -18,7 +18,7 @@ import type pg from 'pg';
 import type { Logger } from 'pino';
 import { listStaleInFlightDocuments, markDocumentFailed } from '../db/documents.js';
 import { failAnswer, listStaleInFlightAnswers } from '../db/messages.js';
-import { enqueuePrepareDocument, enqueueGenerateAnswer, type Queues } from './queues.js';
+import { enqueuePrepareDocument, enqueueGenerateAnswer, messageOf, type Queues } from './queues.js';
 
 export const RECONCILE_INTERVAL_MS = 60_000;
 export const STALE_AFTER_MS = 120_000;
@@ -63,9 +63,14 @@ async function decide(queue: JobLookup, id: string): Promise<Decision> {
 
 const emptyBucket = (): Record<ReconcileAction, string[]> => ({ enqueued: [], failed: [], left: [] });
 
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message || err.name : String(err);
-}
+type Kind = {
+  rows: (pool: pg.Pool, olderThanMs: number) => Promise<{ id: string }[]>;
+  queue: JobLookup;
+  enqueue: (id: string) => Promise<void>;
+  fail: (id: string, message: string) => Promise<boolean>;
+  /** Log field for the row id. */
+  idKey: string;
+};
 
 export function createReconciler(deps: ReconcilerDeps) {
   const staleAfterMs = deps.staleAfterMs ?? STALE_AFTER_MS;
@@ -74,41 +79,44 @@ export function createReconciler(deps: ReconcilerDeps) {
   let running: Promise<ReconcileReport | null> | null = null;
   let stopped = false;
 
+  const documents: Kind = {
+    rows: listStaleInFlightDocuments,
+    queue: deps.queues.prepareDocument,
+    enqueue: (id) => enqueuePrepareDocument(deps.queues.prepareDocument, id),
+    fail: (id, message) => markDocumentFailed(deps.pool, id, STALLED, message),
+    idKey: 'documentId',
+  };
+  const answers: Kind = {
+    rows: listStaleInFlightAnswers,
+    queue: deps.queues.generateAnswer,
+    enqueue: (id) => enqueueGenerateAnswer(deps.queues.generateAnswer, id),
+    fail: (id, message) => failAnswer(deps.pool, id, STALLED, message),
+    idKey: 'messageId',
+  };
+
+  /** Check every stale row of one kind; a failing row is logged and skipped, never aborting the pass. */
+  async function reconcile(kind: Kind): Promise<Record<ReconcileAction, string[]>> {
+    const bucket = emptyBucket();
+    for (const { id } of await kind.rows(deps.pool, staleAfterMs)) {
+      try {
+        const d = await decide(kind.queue, id);
+        if (d.action === 'enqueue') {
+          await kind.enqueue(id);
+          bucket.enqueued.push(id);
+        } else if (d.action === 'fail') {
+          if (await kind.fail(id, d.message)) bucket.failed.push(id);
+        } else {
+          bucket.left.push(id);
+        }
+      } catch (err) {
+        deps.log?.error({ [kind.idKey]: id, err: messageOf(err) }, 'reconciler: row check failed');
+      }
+    }
+    return bucket;
+  }
+
   async function reconcileOnce(): Promise<ReconcileReport> {
-    const report: ReconcileReport = { documents: emptyBucket(), answers: emptyBucket() };
-
-    for (const doc of await listStaleInFlightDocuments(deps.pool, staleAfterMs)) {
-      try {
-        const d = await decide(deps.queues.prepareDocument, doc.id);
-        if (d.action === 'enqueue') {
-          await enqueuePrepareDocument(deps.queues.prepareDocument, doc.id);
-          report.documents.enqueued.push(doc.id);
-        } else if (d.action === 'fail') {
-          if (await markDocumentFailed(deps.pool, doc.id, STALLED, d.message)) report.documents.failed.push(doc.id);
-        } else {
-          report.documents.left.push(doc.id);
-        }
-      } catch (err) {
-        deps.log?.error({ documentId: doc.id, err: messageOf(err) }, 'reconciler: document check failed');
-      }
-    }
-
-    for (const msg of await listStaleInFlightAnswers(deps.pool, staleAfterMs)) {
-      try {
-        const d = await decide(deps.queues.generateAnswer, msg.id);
-        if (d.action === 'enqueue') {
-          await enqueueGenerateAnswer(deps.queues.generateAnswer, msg.id);
-          report.answers.enqueued.push(msg.id);
-        } else if (d.action === 'fail') {
-          if (await failAnswer(deps.pool, msg.id, STALLED, d.message)) report.answers.failed.push(msg.id);
-        } else {
-          report.answers.left.push(msg.id);
-        }
-      } catch (err) {
-        deps.log?.error({ messageId: msg.id, err: messageOf(err) }, 'reconciler: answer check failed');
-      }
-    }
-
+    const report: ReconcileReport = { documents: await reconcile(documents), answers: await reconcile(answers) };
     const changed = [report.documents, report.answers].some((b) => b.enqueued.length + b.failed.length > 0);
     if (changed) deps.log?.warn({ documents: report.documents, answers: report.answers }, 'reconciler repaired rows');
     return report;

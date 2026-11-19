@@ -14,7 +14,10 @@ export type RunOptions = {
   content: string;
   pollMs?: number;
   documentTimeoutMs?: number;
-  /** Keep above the server's MODEL_TIMEOUT_MS (90 s) so a slow answer fails server-side with an error code. */
+  /**
+   * Keep above the server's worst case so a slow answer fails server-side with an error code (a FAIL row)
+   * instead of a harness timeout: 3 attempts × MODEL_TIMEOUT_MS (90 s) + 1 s + 2 s backoff ≈ 273 s.
+   */
   answerTimeoutMs?: number;
   /** Called with every terminal answer (for verbose output). */
   onAnswer?: (turnId: string, answer: AssistantMessage) => void;
@@ -90,7 +93,7 @@ export async function runEvalSuite(opts: RunOptions): Promise<RunResult> {
       conversationId = accepted.conversationId;
       const answer = await pollUntil<AssistantMessage>(
         `answer to "${turn.id}"`,
-        opts.answerTimeoutMs ?? 180_000,
+        opts.answerTimeoutMs ?? 300_000,
         `/messages/${accepted.assistantMessageId}`,
         (m) => m.status === 'completed' || m.status === 'failed',
       );

@@ -10,7 +10,7 @@ import {
   listDocuments,
   type DocumentSummary,
 } from '../../db/documents.js';
-import { enqueuePrepareDocument, settlesWithin } from '../../jobs/queues.js';
+import { enqueueOrDefer, enqueuePrepareDocument } from '../../jobs/queues.js';
 import type { AppDeps } from '../app.js';
 import { HttpError, notFound } from '../errors.js';
 
@@ -20,12 +20,19 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** A UTF-16 surrogate without its pair: cannot be stored as UTF-8, so offsets would drift. */
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
+/**
+ * True when Postgres can store `s` unchanged: no NUL (rejected by Postgres, which would be a 500) and no
+ * unpaired surrogate (silently rewritten to U+FFFD). Applied to every stored text field.
+ */
+export const isStorableText = (s: string) => !s.includes('\u0000') && !LONE_SURROGATE_RE.test(s);
+
 const CreateDocumentBody = z.object({
   title: z
     .string({ error: 'title must be a string' })
     .trim()
     .min(1, 'title must not be empty')
-    .max(MAX_TITLE_LENGTH, `title must be at most ${MAX_TITLE_LENGTH} characters`),
+    .max(MAX_TITLE_LENGTH, `title must be at most ${MAX_TITLE_LENGTH} characters`)
+    .refine(isStorableText, 'title must not contain NUL characters or unpaired UTF-16 surrogates'),
   format: z.enum(['markdown', 'text'], { error: "format must be 'markdown' or 'text'" }),
   content: z.string({ error: 'content must be a string' }),
 });
@@ -87,14 +94,13 @@ export function registerDocumentRoutes(app: FastifyInstance, deps: AppDeps): voi
     }
 
     const doc = await insertDocument(deps.pool, { title, format, content });
-    const enqueued = await settlesWithin(
+    await enqueueOrDefer(
       enqueuePrepareDocument(deps.queues.prepareDocument, doc.id),
       deps.enqueueTimeoutMs ?? 2_000,
+      req.log,
+      { documentId: doc.id },
+      'prepare-document',
     );
-    if (!enqueued.ok) {
-      // The pending row is the source of truth; the reconciler enqueues stale pending documents.
-      req.log.warn({ documentId: doc.id, err: enqueued.error }, 'prepare-document enqueue deferred to reconciler');
-    }
     return reply.code(202).send({ id: doc.id, status: doc.status });
   });
 
