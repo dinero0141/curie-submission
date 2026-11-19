@@ -96,7 +96,9 @@ export type DropReason =
   | 'document_out_of_range'
   | 'block_out_of_range'
   | 'cited_text_missing'
-  | 'cited_text_mismatch';
+  | 'cited_text_mismatch'
+  /** The citation verified, but the answer text is blank: a quote with no answer is not an answer. */
+  | 'empty_answer_text';
 
 export type DroppedCitation = {
   reason: DropReason;
@@ -197,7 +199,8 @@ function notFoundReasonOf(
 
 /**
  * Map the model's citations to verified source quotations and decide whether the answer is grounded.
- * Answerable when at least one citation survives verification (the model text is kept as is, marker included).
+ * Answerable when at least one citation survives verification and the answer text is not blank (the model text is
+ * kept as is, marker included; a blank answer's citations are dropped as `empty_answer_text`).
  * Otherwise the `NOT_IN_DOCUMENT` marker (see `hasNotInDocumentMarker`) is reported as "not in the document",
  * a `max_tokens` stop is `truncated` and anything else is `unverified`.
  */
@@ -209,6 +212,8 @@ export function resolveCitations(
 ): ResolvedAnswer {
   const citations: Citation[] = [];
   const dropped: DroppedCitation[] = [];
+  /** Every citation that verified, as the model sent it (kept for an `empty_answer_text` drop). */
+  const verified: Omit<DroppedCitation, 'reason'>[] = [];
   let rawText = '';
 
   raw.blocks.forEach((block, answerBlock) => {
@@ -221,6 +226,7 @@ export function resolveCitations(
         dropped.push({ reason: located, answerBlock, citation: c });
         continue;
       }
+      verified.push({ answerBlock, citation: c });
       const prev = citations.at(-1);
       if (
         prev &&
@@ -235,6 +241,13 @@ export function resolveCitations(
       citations.push({ ...located, answerStart, answerEnd });
     }
   });
+
+  // A blank answer cannot be displayed or used as history, whatever it cites: drop its citations, so it ends as
+  // `unverified` (or `truncated` after `max_tokens`) instead of completing with empty content.
+  if (citations.length > 0 && rawText.trim() === '') {
+    for (const v of verified) dropped.push({ reason: 'empty_answer_text', ...v });
+    citations.length = 0;
+  }
 
   const notFoundReason = notFoundReasonOf(rawText, citations, dropped, raw.stopReason);
   if (notFoundReason) {

@@ -3,7 +3,8 @@
  * `samples/harbor-archive.md` with the real chunker, builds each request with `buildRequest`, calls
  * `createAnswerModel(config).generate`, and verifies the reply with `resolveCitations` — the same path the
  * generate-answer processor runs. Three questions (`SMOKE_QUESTIONS` in `scripts/smoke-check.ts`): one answerable,
- * one not in the document, and a follow-up that is only answerable through history.
+ * one not in the document, and a follow-up to the first one (its history is that turn) that is only answerable
+ * through history.
  *
  *   pnpm smoke     # MODEL_PROVIDER=gemini + GEMINI_API_KEY (or anthropic + ANTHROPIC_API_KEY) in the env file
  *
@@ -18,9 +19,9 @@ import { chunkDocument } from '../src/domain/chunking.js';
 import { resolveCitations } from '../src/domain/citations.js';
 import { classifyError } from '../src/llm/errors.js';
 import { createAnswerModel } from '../src/llm/index.js';
-import { buildRequest, type PromptMessage } from '../src/llm/prompt.js';
+import { buildRequest } from '../src/llm/prompt.js';
 import { loadEnvFile } from '../src/loadEnv.js';
-import { checkSmokeAnswer, FALLBACK_KEYWORD_ANSWER, formatSmokeRow, SMOKE_QUESTIONS, type SmokeRow } from './smoke-check.js';
+import { checkSmokeAnswer, formatSmokeRow, SMOKE_QUESTIONS, smokeHistory, type SmokeRow, type SmokeTurn } from './smoke-check.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const DOCUMENT_TITLE = 'Harbor Archive retrieval pilot';
@@ -50,15 +51,10 @@ async function main(): Promise<number> {
   console.log(`smoke: provider ${config.modelProvider}, model ${modelIdOf(config)}, ${passages.length} passages, ${SMOKE_QUESTIONS.length} questions\n`);
 
   const rows: SmokeRow[] = [];
-  let previous: { question: string; answer: string | null } | null = null;
+  // Finished turns by question id: a follow-up's history is the turn it names (`followUpOf`), not the last one.
+  const turns = new Map<string, SmokeTurn>();
   for (const q of SMOKE_QUESTIONS) {
-    const history: PromptMessage[] =
-      q.followUp && previous
-        ? [
-            { role: 'user', content: previous.question, status: 'completed' },
-            { role: 'assistant', content: previous.answer ?? FALLBACK_KEYWORD_ANSWER, status: 'completed' },
-          ]
-        : [];
+    const history = smokeHistory(q, turns);
     const request = buildRequest({ documentTitle: DOCUMENT_TITLE, content, passages, history, question: q.question });
     const started = Date.now();
     let row: SmokeRow;
@@ -91,12 +87,12 @@ async function main(): Promise<number> {
         seconds: (Date.now() - started) / 1000,
         check: { pass: false, reason: classified.message },
       });
-      previous = { question: q.question, answer: null };
+      turns.set(q.id, { question: q.question, answer: null });
       continue;
     }
     rows.push(row);
     console.log(`${formatSmokeRow(row)}\n`);
-    previous = { question: q.question, answer: row.resolved.answerable ? row.resolved.text : null };
+    turns.set(q.id, { question: q.question, answer: row.resolved.answerable ? row.resolved.text : null });
   }
 
   const passed = rows.filter((r) => r.check.pass).length;

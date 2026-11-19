@@ -7,13 +7,15 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { UnrecoverableError } from 'bullmq';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { insertConversation } from '../../src/db/conversations.js';
 import { insertDocument } from '../../src/db/documents.js';
 import { getMessage, insertMessage } from '../../src/db/messages.js';
 import type { Citation } from '../../src/domain/citations.js';
 import { createGenerateAnswerProcessor } from '../../src/jobs/generateAnswer.js';
 import { createPrepareDocumentProcessor } from '../../src/jobs/prepareDocument.js';
+import { closeQueues, createQueues, createRedisConnection, enqueueGenerateAnswer, RETRY_AFTER_BACKOFF } from '../../src/jobs/queues.js';
+import { createGenerateAnswerWorker } from '../../src/jobs/generateAnswer.js';
 import { GeminiModel } from '../../src/llm/gemini.js';
 import { useIntegrationEnv } from './setup.js';
 
@@ -36,12 +38,19 @@ function findSentence(prompt: string, prefix: string): { passage: number; senten
 
 type Body = { contents: { role: string; parts: { text: string }[] }[] };
 
-/** A Gemini stub that cites the sentence starting with `prefix`; `quote` overrides the copied text. */
-function geminiStub(prefix: string, quote?: string) {
+/**
+ * A Gemini stub that cites the sentence starting with `prefix`; `quote` overrides the copied text. `before[i]`,
+ * when set, is returned for call `i` instead (e.g. a 429).
+ */
+function geminiStub(prefix: string, quote?: string, before: (() => Response)[] = []) {
   const calls: Body[] = [];
+  const callTimes: number[] = [];
   const fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as Body;
     calls.push(body);
+    callTimes.push(Date.now());
+    const early = before[calls.length - 1];
+    if (early) return early();
     const prompt = body.contents.at(-1)!.parts[0]!.text;
     const s = findSentence(prompt, prefix);
     const answer = {
@@ -61,7 +70,7 @@ function geminiStub(prefix: string, quote?: string) {
     );
   }) as typeof globalThis.fetch;
   const model = new GeminiModel({ apiKey: 'test-key-not-real', model: 'gemini-3.8-flash', maxAnswerTokens: 1024, timeoutMs: 5_000, fetch, baseURL: 'http://stub.invalid' });
-  return { model, calls };
+  return { model, calls, callTimes };
 }
 
 let docId: string;
@@ -117,5 +126,54 @@ describe('generate-answer with GeminiModel (stubbed fetch)', () => {
     expect(outcome).toBeInstanceOf(UnrecoverableError);
     expect(row).toMatchObject({ status: 'failed', content: '', errorCode: 'citations_unverified', attempts: 1 });
     expect(row.citations).toBeNull();
+  });
+});
+
+describe('generate-answer worker: a Gemini 429 waits its RetryInfo.retryDelay', () => {
+  const redis = createRedisConnection(env.redisUrl);
+  // The production backoff type with a tiny base delay: only the 429's retryDelay can make the wait long.
+  const queues = createQueues(redis, { prefix: env.bullPrefix, generateAnswer: { backoff: { type: RETRY_AFTER_BACKOFF, delay: 1 } } });
+
+  afterAll(async () => {
+    await closeQueues(queues);
+    await redis.quit();
+  });
+
+  it('retries after at least the retryDelay, then completes', async () => {
+    const RETRY_DELAY_MS = 700;
+    const tooMany = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 429,
+            message: 'You exceeded your current quota.',
+            status: 'RESOURCE_EXHAUSTED',
+            details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: `${RETRY_DELAY_MS / 1000}s` }],
+          },
+        }),
+        { status: 429, headers: { 'content-type': 'application/json' } },
+      );
+    const { model, callTimes } = geminiStub('Keyword search returned', undefined, [tooMany]);
+    const worker = createGenerateAnswerWorker(redis, { pool: env.pool, model, fullContextTokens: 60_000, partialWriteMs: 10 }, { prefix: env.bullPrefix });
+    try {
+      await worker.waitUntilReady();
+      const conversation = await insertConversation(env.pool, docId);
+      await insertMessage(env.pool, { conversationId: conversation.id, role: 'user', content: 'How many of the 40 questions did keyword search answer?' });
+      const assistant = await insertMessage(env.pool, { conversationId: conversation.id, role: 'assistant' });
+      await enqueueGenerateAnswer(queues.generateAnswer, assistant.id);
+
+      const deadline = Date.now() + 10_000;
+      let row = (await getMessage(env.pool, assistant.id))!;
+      while (row.status !== 'completed' && row.status !== 'failed' && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+        row = (await getMessage(env.pool, assistant.id))!;
+      }
+      expect(row).toMatchObject({ status: 'completed', answerable: true, attempts: 2 });
+      expect(callTimes).toHaveLength(2);
+      // The 1 ms exponential base alone would retry almost at once.
+      expect(callTimes[1]! - callTimes[0]!).toBeGreaterThanOrEqual(RETRY_DELAY_MS - 50);
+    } finally {
+      await worker.close();
+    }
   });
 });

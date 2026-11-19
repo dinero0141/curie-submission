@@ -4,28 +4,55 @@
  * `scripts/eval-check.ts`) applied to what the processor would store for a `resolveCitations` result.
  */
 import type { ResolvedAnswer } from '../src/domain/citations.js';
+import type { PromptMessage } from '../src/llm/prompt.js';
 import { checkAnswer, type AnswerView, type CheckResult, type Outcome } from './eval-check.js';
 
 export type SmokeQuestion = {
   id: string;
   question: string;
   expect: Outcome;
-  /** Send the previous question and its answer as history (a follow-up). */
-  followUp?: boolean;
+  /**
+   * A follow-up: the id of the earlier question whose question and answer are sent as history (not simply the
+   * question that ran last; `smokeHistory`).
+   */
+  followUpOf?: string;
 };
 
 /** Few questions on purpose: each is one model request, and free-tier quotas are small. */
 export const SMOKE_QUESTIONS: SmokeQuestion[] = [
   { id: 'keyword', question: 'How many of the 40 questions did keyword search answer?', expect: { answerable: true, quoteIncludes: '28 of the 40' } },
   { id: 'budget', question: "What was the pilot's budget?", expect: { answerable: false } },
-  { id: 'hybrid-followup', question: 'And the hybrid prototype?', expect: { answerable: true, quoteIncludes: '34 of the 40' }, followUp: true },
+  {
+    id: 'hybrid-followup',
+    question: 'And the hybrid prototype?',
+    expect: { answerable: true, quoteIncludes: '34 of the 40' },
+    followUpOf: 'keyword',
+  },
 ];
 
 /**
- * History for a follow-up when the first answer did not complete: the document's own sentence, so the follow-up
- * still tests history handling rather than failing because of the first question.
+ * History answer for the keyword follow-up when the keyword answer did not complete: the document's own sentence,
+ * so the follow-up still tests history handling rather than failing because of the first question.
  */
 export const FALLBACK_KEYWORD_ANSWER = 'Keyword search returned a relevant passage for 28 of the 40 questions.';
+
+/** A finished smoke turn: its answer text when it was answerable, else `null`. */
+export type SmokeTurn = { question: string; answer: string | null };
+
+/**
+ * History for `q`: none unless it is a follow-up; else the turn named by `followUpOf` (its question, and its
+ * answer or `FALLBACK_KEYWORD_ANSWER` when that answer did not complete). Throws when that turn has not run, which
+ * is a mistake in `SMOKE_QUESTIONS`.
+ */
+export function smokeHistory(q: SmokeQuestion, turns: ReadonlyMap<string, SmokeTurn>): PromptMessage[] {
+  if (!q.followUpOf) return [];
+  const turn = turns.get(q.followUpOf);
+  if (!turn) throw new Error(`smoke question ${q.id} follows up on ${q.followUpOf}, which has not run before it`);
+  return [
+    { role: 'user', content: turn.question, status: 'completed' },
+    { role: 'assistant', content: turn.answer ?? FALLBACK_KEYWORD_ANSWER, status: 'completed' },
+  ];
+}
 
 /**
  * What the processor would store for this result (`status`, `answerable`, `content`, `citations`, `error`):

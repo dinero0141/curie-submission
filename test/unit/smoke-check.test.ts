@@ -6,7 +6,9 @@ import {
   FALLBACK_KEYWORD_ANSWER,
   formatSmokeRow,
   SMOKE_QUESTIONS,
+  smokeHistory,
   toAnswerView,
+  type SmokeTurn,
 } from '../../scripts/smoke-check.js';
 import { NOT_FOUND_MESSAGE, type Citation, type ResolvedAnswer } from '../../src/domain/citations.js';
 
@@ -44,11 +46,48 @@ const expectOf = (id: string) => SMOKE_QUESTIONS.find((q) => q.id === id)!.expec
 describe('smoke questions', () => {
   it('cover an answerable question, a not-found one and a follow-up, with expectations the sample satisfies', () => {
     expect(SMOKE_QUESTIONS.map((q) => q.id)).toEqual(['keyword', 'budget', 'hybrid-followup']);
-    expect(SMOKE_QUESTIONS.filter((q) => q.followUp).map((q) => q.id)).toEqual(['hybrid-followup']);
+    expect(SMOKE_QUESTIONS.filter((q) => q.followUpOf).map((q) => [q.id, q.followUpOf])).toEqual([['hybrid-followup', 'keyword']]);
     expect(checkSmokeAnswer(answered(KEYWORD), expectOf('keyword'), SAMPLE).pass).toBe(true);
     expect(checkSmokeAnswer(notFound, expectOf('budget'), SAMPLE).pass).toBe(true);
     expect(checkSmokeAnswer(answered(HYBRID), expectOf('hybrid-followup'), SAMPLE).pass).toBe(true);
     expect(SAMPLE).toContain(FALLBACK_KEYWORD_ANSWER);
+  });
+});
+
+describe('smokeHistory', () => {
+  const byId = (id: string) => SMOKE_QUESTIONS.find((q) => q.id === id)!;
+
+  /** Run the questions in order the way scripts/smoke.ts does, recording the history each one is sent. */
+  function historiesFor(answers: Record<string, string | null>) {
+    const turns = new Map<string, SmokeTurn>();
+    const sent = new Map<string, ReturnType<typeof smokeHistory>>();
+    for (const q of SMOKE_QUESTIONS) {
+      sent.set(q.id, smokeHistory(q, turns));
+      turns.set(q.id, { question: q.question, answer: answers[q.id] ?? null });
+    }
+    return sent;
+  }
+
+  it('sends the keyword turn as the follow-up history, even with the not-found budget question run in between', () => {
+    const sent = historiesFor({ keyword: 'Keyword search answered 28 of the 40.', budget: null });
+    expect(sent.get('keyword')).toEqual([]);
+    expect(sent.get('budget')).toEqual([]);
+    expect(sent.get('hybrid-followup')).toEqual([
+      { role: 'user', content: byId('keyword').question, status: 'completed' },
+      { role: 'assistant', content: 'Keyword search answered 28 of the 40.', status: 'completed' },
+    ]);
+  });
+
+  it('falls back to the keyword sentence when the keyword answer did not complete', () => {
+    const sent = historiesFor({ keyword: null, budget: 'should never be used' });
+    expect(sent.get('hybrid-followup')).toEqual([
+      { role: 'user', content: byId('keyword').question, status: 'completed' },
+      { role: 'assistant', content: FALLBACK_KEYWORD_ANSWER, status: 'completed' },
+    ]);
+  });
+
+  it('refuses a follow-up whose turn has not run yet', () => {
+    expect(() => smokeHistory(byId('hybrid-followup'), new Map())).toThrow(/follows up on keyword/);
   });
 });
 

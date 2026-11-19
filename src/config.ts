@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DEFAULT_PASSAGE_TOKENS } from './domain/chunking.js';
+import { normalizeGeminiModelId } from './llm/gemini.js';
 
 /** Treat empty strings (e.g. `FOO=` in .env) as "not set" so defaults apply. */
 const emptyToUndefined = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
@@ -30,7 +31,8 @@ const ConfigSchema = z
     ANTHROPIC_API_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
     ANTHROPIC_MODEL: z.preprocess(emptyToUndefined, z.string().default('claude-sonnet-5-5')),
     GEMINI_API_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
-    GEMINI_MODEL: z.preprocess(emptyToUndefined, z.string().default(DEFAULT_GEMINI_MODEL)),
+    // `models/<id>` (the resource name models.list prints) is accepted and stored as the bare id.
+    GEMINI_MODEL: z.preprocess(emptyToUndefined, z.string().default(DEFAULT_GEMINI_MODEL).transform(normalizeGeminiModelId)),
     MAX_DOCUMENT_BYTES: positiveInt(5 * 1024 * 1024),
     FULL_CONTEXT_TOKENS: positiveInt(60_000),
     PASSAGE_TOKENS: positiveInt(DEFAULT_PASSAGE_TOKENS),

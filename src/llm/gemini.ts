@@ -21,7 +21,7 @@
  */
 import { z } from 'zod';
 import { NOT_IN_DOCUMENT_MARKER } from '../domain/citations.js';
-import { GeminiApiError, GeminiConnectionError, ModelRefusalError, ModelTimeoutError } from './errors.js';
+import { GeminiAccountError, GeminiApiError, GeminiConnectionError, ModelRefusalError, ModelTimeoutError, type GeminiErrorDetails } from './errors.js';
 import type { AnswerModel, AnswerRequest, RawAnswer, RawCitation, RequestDocument } from './types.js';
 
 export const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
@@ -41,14 +41,30 @@ export const GEMINI_THINKING_HEADROOM_TOKENS = 4096;
 /**
  * Gemini 3+ takes `thinkingLevel`. `low`: grounded extraction needs little reasoning, `minimal` is rejected by
  * gemini-3.8-flash and Gemini 4, and the default (`medium` on 3.8 Flash, `high` on Gemini 4) costs latency and
- * free-tier quota. Gemini 2.x rejects `thinkingLevel` (it takes `thinkingBudget` only), so nothing is sent there
- * and the model default applies. Notes fact 10.
+ * free-tier quota. Flash-Lite models (and the Flash-Lite image model) already default to `minimal`, so `low` would
+ * raise their thinking: nothing is sent there. Gemini 2.x rejects `thinkingLevel` (it takes `thinkingBudget`
+ * only), so nothing is sent there either. Per-model defaults: https://aistudio.google.com/docs/thinking?generate-content=true
+ * (notes fact 10).
  */
 export const GEMINI_THINKING_LEVEL = 'low' as const;
 
-/** `thinkingConfig` for a model id, or `undefined` to leave the model default (non Gemini 3+ ids). */
+/**
+ * `thinkingConfig` for a model id, or `undefined` to leave the model default: non Gemini 3+ ids, and the
+ * Flash-Lite / image ids whose default (`minimal`) is already below `low`.
+ */
 export function thinkingConfigFor(model: string): { thinkingLevel: typeof GEMINI_THINKING_LEVEL } | undefined {
-  return /^gemini-([3-9]|\d{2,})(\.|-)/.test(model) ? { thinkingLevel: GEMINI_THINKING_LEVEL } : undefined;
+  const id = normalizeGeminiModelId(model);
+  if (!/^gemini-([3-9]|\d{2,})(\.|-)/.test(id)) return undefined;
+  if (/-lite(-|$)|-image(-|$)/.test(id)) return undefined;
+  return { thinkingLevel: GEMINI_THINKING_LEVEL };
+}
+
+/**
+ * The bare model id: models.list and Google's examples use the resource name `models/<id>`, but the URL already
+ * has `/models/`, so a pasted `models/gemini-3.8-flash` would 404. Applied by `loadConfig` and `GeminiModel`.
+ */
+export function normalizeGeminiModelId(model: string): string {
+  return model.trim().replace(/^models\//, '');
 }
 
 /**
@@ -255,10 +271,18 @@ export const REFUSAL_FINISH_REASONS = new Set([
   'BLOCKLIST',
   'PROHIBITED_CONTENT',
   'SPII',
+  'ESCALATION',
   'IMAGE_SAFETY',
   'IMAGE_PROHIBITED_CONTENT',
   'IMAGE_RECITATION',
+  'IMAGE_OTHER',
 ]);
+
+/**
+ * Finish reasons that say the account itself cannot be used (fact 15): `GeminiAccountError` →
+ * `model_config_error`, so the failure points at the project, not at the citation mapping.
+ */
+export const ACCOUNT_FINISH_REASONS = new Set(['PUP_LIMITED_DISABLED']);
 
 /**
  * finishReason → `RawAnswer.stopReason`, in the vocabulary `resolveCitations` and the processor use. CONTINUATION
@@ -288,6 +312,7 @@ function candidateText(candidate: NonNullable<GeminiResponse['candidates']>[numb
 /**
  * A 200 generateContent body → `RawAnswer`. Never throws on the model's JSON:
  * - `promptFeedback.blockReason` (blocked prompt) or a blocking finishReason → `ModelRefusalError`;
+ * - an account finishReason (`PUP_LIMITED_DISABLED`) → `GeminiAccountError` (`model_config_error`);
  * - no candidate and no block reason → no blocks, stopReason `no_candidates` (→ `unverified` →
  *   `citations_unverified`). Chosen over a retryable error: a retry spends free-tier quota on a reply the API
  *   already declined to give, and the worker's warn log shows the stopReason;
@@ -306,6 +331,7 @@ export function geminiToRawAnswer(body: unknown, configuredModel: string): RawAn
 
   const finishReason = typeof candidate.finishReason === 'string' ? candidate.finishReason : 'FINISH_REASON_UNSPECIFIED';
   if (REFUSAL_FINISH_REASONS.has(finishReason)) throw new ModelRefusalError(finishReason.toLowerCase());
+  if (ACCOUNT_FINISH_REASONS.has(finishReason)) throw new GeminiAccountError(finishReason);
   const stopReason = stopReasonOf(finishReason);
 
   const text = candidateText(candidate);
@@ -315,7 +341,33 @@ export function geminiToRawAnswer(body: unknown, configuredModel: string): RawAn
   return { blocks: text === '' ? [] : [{ text, citations: null }], stopReason, usage, model };
 }
 
-/** A non-2xx response → `GeminiApiError` from the `{error: {code, message, status}}` envelope (fact 17). */
+const RETRY_INFO = 'type.googleapis.com/google.rpc.RetryInfo';
+const QUOTA_FAILURE = 'type.googleapis.com/google.rpc.QuotaFailure';
+
+/** A protobuf JSON `Duration` (`"41s"`, `"0.5s"`) → ms; `null` when it is not one. */
+export function durationMs(v: unknown): number | null {
+  if (typeof v !== 'string') return null;
+  const m = /^(\d+(?:\.\d+)?)s$/.exec(v.trim());
+  return m ? Math.ceil(Number(m[1]) * 1000) : null;
+}
+
+/**
+ * The standard `google.rpc` details of an error envelope (fact 18b): `RetryInfo.retryDelay` and whether a
+ * `QuotaFailure` violation reports a quota of 0. Unknown or malformed entries are ignored.
+ */
+export function errorDetailsOf(details: unknown): GeminiErrorDetails {
+  const out: GeminiErrorDetails = { retryDelayMs: null, quotaZero: false };
+  for (const d of Array.isArray(details) ? details : []) {
+    if (!isRecord(d)) continue;
+    if (d['@type'] === RETRY_INFO) out.retryDelayMs = durationMs(d.retryDelay) ?? out.retryDelayMs;
+    if (d['@type'] === QUOTA_FAILURE && Array.isArray(d.violations)) {
+      if (d.violations.some((v) => isRecord(v) && String(v.quotaValue) === '0')) out.quotaZero = true;
+    }
+  }
+  return out;
+}
+
+/** A non-2xx response → `GeminiApiError` from the `{error: {code, message, status, details}}` envelope (fact 17). */
 export function geminiApiError(httpStatus: number, bodyText: string): GeminiApiError {
   let error: unknown;
   try {
@@ -325,7 +377,7 @@ export function geminiApiError(httpStatus: number, bodyText: string): GeminiApiE
   }
   const e = isRecord(error) ? error : {};
   const message = typeof e.message === 'string' && e.message !== '' ? e.message : bodyText.slice(0, 200) || `HTTP ${httpStatus}`;
-  return new GeminiApiError(httpStatus, typeof e.status === 'string' ? e.status : null, message);
+  return new GeminiApiError(httpStatus, typeof e.status === 'string' ? e.status : null, message, errorDetailsOf(e.details));
 }
 
 export type GeminiModelOptions = {
@@ -343,11 +395,14 @@ export class GeminiModel implements AnswerModel {
   private readonly fetch: typeof globalThis.fetch;
   private readonly url: string;
 
-  constructor(private readonly opts: GeminiModelOptions) {
+  private readonly opts: GeminiModelOptions;
+
+  constructor(opts: GeminiModelOptions) {
+    this.opts = { ...opts, model: normalizeGeminiModelId(opts.model) };
     this.fetch = opts.fetch ?? globalThis.fetch;
     const base = (opts.baseURL ?? GEMINI_BASE_URL).replace(/\/+$/, '');
     // The key goes in the `x-goog-api-key` header, never in the URL (URLs end up in logs).
-    this.url = `${base}/${GEMINI_API_VERSION}/models/${encodeURIComponent(opts.model)}:generateContent`;
+    this.url = `${base}/${GEMINI_API_VERSION}/models/${encodeURIComponent(this.opts.model)}:generateContent`;
   }
 
   /**

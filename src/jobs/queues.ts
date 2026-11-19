@@ -2,9 +2,10 @@
  * BullMQ queues and Redis connections shared by the API (producer) and the worker (consumer).
  * Job ids are the row ids (`documentId`, `assistantMessageId`), so enqueueing twice is a no-op.
  */
-import { Queue, Worker, type DefaultJobOptions, type Job, type Processor } from 'bullmq';
+import { Queue, Worker, type BackoffOptions, type DefaultJobOptions, type Job, type Processor } from 'bullmq';
 import { Redis } from 'ioredis';
 import type { Logger } from 'pino';
+import { classifyError } from '../llm/errors.js';
 
 export const QUEUE_NAMES = {
   prepareDocument: 'prepare-document',
@@ -15,14 +16,31 @@ export type PrepareDocumentJobData = { documentId: string };
 /** `messageId` is the assistant message being answered (also the job id). */
 export type GenerateAnswerJobData = { messageId: string };
 
+/**
+ * Custom backoff type (`backoffDelayMs`, registered by `createWorker`): exponential from `delay`, but never shorter
+ * than the error's `retryAfterMs` (a Gemini 429's `RetryInfo`). BullMQ's built-in `exponential` cannot see the
+ * error, and BullMQ calls a custom strategy only for a type that is not built in.
+ */
+export const RETRY_AFTER_BACKOFF = 'exponential-retry-after';
+
 /** Defaults for both queues; the processors' final-state rule reads `attempts` from the job. */
 export const JOB_OPTIONS: DefaultJobOptions = {
   attempts: 3,
-  backoff: { type: 'exponential', delay: 1_000 },
+  backoff: { type: RETRY_AFTER_BACKOFF, delay: 1_000 },
   // Keep finished jobs for a while so the reconciler can tell "completed/failed" from "never enqueued".
   removeOnComplete: { age: 24 * 3600, count: 10_000 },
   removeOnFail: { age: 7 * 24 * 3600 },
 };
+
+/**
+ * Delay before the next attempt for `RETRY_AFTER_BACKOFF`: `delay * 2^(attemptsMade - 1)` (BullMQ's exponential;
+ * `attemptsMade` counts the attempt that just failed), raised to `classifyError(err).retryAfterMs` when set.
+ */
+export function backoffDelayMs(attemptsMade: number, backoff: number | BackoffOptions | undefined, err: unknown): number {
+  const base = typeof backoff === 'number' ? backoff : (backoff?.delay ?? 0);
+  const exponential = Math.round(2 ** Math.max(0, attemptsMade - 1) * base);
+  return Math.max(exponential, classifyError(err).retryAfterMs ?? 0);
+}
 
 /** True when this run is the job's last allowed attempt (`attemptsMade` counts finished attempts). */
 export function isFinalAttempt(job: Pick<Job, 'attemptsMade' | 'opts'>): boolean {
@@ -160,6 +178,7 @@ export function createWorker<D extends object, R>(spec: {
   const worker = new Worker<D, R>(name, spec.processor, {
     connection: spec.connection,
     concurrency: spec.concurrency,
+    settings: { backoffStrategy: (attemptsMade, _type, err, job) => backoffDelayMs(attemptsMade, job?.opts.backoff, err) },
     ...(spec.prefix ? { prefix: spec.prefix } : {}),
   });
   worker.on('failed', (job, err) => {

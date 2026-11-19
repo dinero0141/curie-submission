@@ -74,7 +74,7 @@ Stop everything with `docker compose down` (add `-v` to drop the database volume
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_PROVIDER=anthropic` (the app refuses to start without it) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | The request shape (Citations, adaptive thinking, `output_config.effort`) is assumed for the default model. Another model must accept all three; unverified (keyless build) |
 | `GEMINI_API_KEY` | — | Required when `MODEL_PROVIDER=gemini`. Free tier: Google may use prompts to improve its products, so send only documents you may share ([gemini-notes](docs/notes/gemini-notes.md), fact 23) |
-| `GEMINI_MODEL` | `gemini-3.8-flash` | Stable free-tier Flash model; `thinkingLevel: low` is sent to Gemini 3+/4 ids only. Alternatives: `gemini-3.5-flash-lite`, `gemini-4-hydrogen`. Unverified (no live call yet) |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Stable free-tier Flash model (a `models/` prefix is stripped); `thinkingLevel: low` is sent to Gemini 3+/4 ids only, not to Flash-Lite ids (their default, `minimal`, is lower). Alternatives: `gemini-3.5-flash-lite`, `gemini-4-hydrogen`. Unverified (no live call yet) |
 | `MAX_ANSWER_TOKENS` | `1024` | Answer budget; Claude adds 4096 tokens of thinking headroom, Gemini adds 2048 (JSON and copied quotes) + 4096 (thinking) |
 | `MODEL_TIMEOUT_MS` | `90000` | Deadline for one answer; a timeout is retried |
 | `FULL_CONTEXT_TOKENS` | `60000` | Documents up to this estimated size are sent whole |
@@ -201,7 +201,7 @@ pnpm typecheck
 
 Integration tests use the `curie_test` database (created on first Postgres volume init) and fail fast with a hint if
 Postgres or Redis is down. All tests use the fake model, or a stubbed `fetch` for the Claude and Gemini adapters (no
-network). Current result: 335 tests in 21 files pass (232 unit, 103 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
+network). Current result: 363 tests in 21 files pass (259 unit, 104 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
 
 `pnpm spike` (`scripts/spike-citations.ts`) sends the production request body (`toAnthropicParams(buildRequest(...))`)
 for the sample document, dumps the raw Citations responses, and needs an Anthropic key.
@@ -216,7 +216,8 @@ pnpm smoke   # MODEL_PROVIDER=gemini + GEMINI_API_KEY (or anthropic + ANTHROPIC_
 real chunker on `samples/harbor-archive.md`, `buildRequest`, `model.generate`, `resolveCitations`. Three sequential
 requests, no retries (free-tier quota): "How many of the 40 questions did keyword search answer?" (expects a verified
 quote containing "28 of the 40"), "What was the pilot's budget?" (expects not found), and the follow-up "And the hybrid
-prototype?" with the first turn as history (expects "34 of the 40"). Per question it prints the outcome, the verified
+prototype?" with the keyword turn as history (`followUpOf: 'keyword'`; the document's keyword sentence stands in if that
+answer did not complete), expecting "34 of the 40". Per question it prints the outcome, the verified
 quotes with offsets, drop reasons, stop reason, model and usage; it exits 1 if an expectation fails and 2 on a
 configuration, HTTP or network error. It refuses `MODEL_PROVIDER=fake` and never prints the key. The checks
 (`scripts/smoke-check.ts`) are unit-tested. **Not run yet** (no key in this build).

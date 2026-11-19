@@ -285,12 +285,12 @@ Answer `error.code`:
 
 | Code | Meaning | Retry? |
 |---|---|---|
-| `model_unavailable` | Rate limit, overload, 5xx, network error or timeout on all 3 attempts | Ask again later |
+| `model_unavailable` | Rate limit, overload, 5xx, network error or timeout on all 3 attempts (a Gemini rate limit is retried only after the delay the API asks for; one asking for more than 2 minutes fails at once) | Ask again later |
 | `context_too_large` | The model rejected the prompt as too long | Not retried; asking again sends the same passages |
-| `model_config_error` | Request rejected (bad key, unknown model, invalid request) | No; operator problem |
+| `model_config_error` | Request rejected (bad key, unknown model, invalid request; Gemini: no quota at all for the model, or the account is limited) | No; operator problem |
 | `model_refused` | The model declined to answer | Rephrase |
 | `answer_truncated` | The answer hit the `max_tokens` limit before it cited the document; says nothing about whether the document answers the question. Not retried | Ask a narrower question; operators can raise `MAX_ANSWER_TOKENS` |
-| `citations_unverified` | The model answered, but no citation could be verified against the document (it cited nothing, or every citation failed verification); says nothing about whether the document answers the question. Not retried; the worker log has each drop reason | Ask again or rephrase; if it happens for every question, operators should check the Citations shapes (`docs/notes/citations-spike.md`) |
+| `citations_unverified` | The model answered, but no citation could be verified against the document (it cited nothing, every citation failed verification, or the answer text was blank); says nothing about whether the document answers the question. Not retried; the worker log has each drop reason | Ask again or rephrase; if it happens for every question, operators should check the Citations shapes (`docs/notes/citations-spike.md`) |
 | `internal_error` | Server bug or inconsistent data; `message` is generic (details are only in the worker log) | Ask again |
 | `stalled` | Job lost or failed outside the processor | Ask again |
 

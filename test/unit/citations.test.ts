@@ -354,6 +354,23 @@ describe('resolveCitations — not answerable', () => {
     expect(r).toMatchObject({ answerable: false, text: '', rawText: '', notFoundReason: 'unverified' });
   });
 
+  it('drops the verified citations of a blank answer as empty_answer_text (never completes with empty text)', () => {
+    const c0 = cite(docs, results, 0, 1);
+    const c1 = cite(docs, results, 1, 2);
+    const r = resolveCitations(answer({ text: '', citations: [c0] }, { text: ' \n', citations: [c1] }), docs, content);
+    expect(r).toMatchObject({ answerable: false, text: '', citations: [], notFoundReason: 'unverified' });
+    expect(r.dropped).toEqual([
+      { reason: 'empty_answer_text', answerBlock: 0, citation: c0 },
+      { reason: 'empty_answer_text', answerBlock: 1, citation: c1 },
+    ]);
+    // After max_tokens a blank answer is a truncation; one non-blank segment keeps the answer answerable.
+    const cut = { ...answer({ text: '', citations: [c0] }), stopReason: 'max_tokens' };
+    expect(resolveCitations(cut, docs, content).notFoundReason).toBe('truncated');
+    const some = resolveCitations(answer({ text: '', citations: [c0] }, { text: 'Claim.' }), docs, content);
+    expect(some).toMatchObject({ answerable: true, text: 'Claim.', dropped: [] });
+    expect(some.citations).toHaveLength(1);
+  });
+
   it('does not treat the marker in the middle of a cited answer as not-found', () => {
     const r = resolveCitations(
       answer({ text: `Keyword search found 28 (not ${NOT_IN_DOCUMENT_MARKER} anything).`, citations: [cite(docs, results, 0, 1)] }),
