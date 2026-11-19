@@ -155,9 +155,25 @@ cites the document's first sentence):
   "model": "fake",
   "usage": {"input_tokens": 0, "output_tokens": 0},
   "attempts": 1,
-  "retrieval": {"mode": "full", "passageOrdinals": [0, 1, 2, 3, 4], "tokenEstimate": 416, "documentTokens": 416,
-                "debug": {"notFoundReason": null, "dropped": []}}
+  "retrieval": {"mode": "full", "passageIds": ["3df759d5-…", "…"], "passageOrdinals": [0, 1, 2, 3, 4], "hits": [],
+                "tokenEstimate": 416, "documentTokens": 416,
+                "debug": {"query": null, "notFoundReason": null, "dropped": []}}
 }
+```
+
+The `passageIds`, `hits` and `debug.query` fields were added with ranked retrieval after this capture; they are
+filled in here from the code (`src/jobs/generateAnswer.ts`), not re-captured over HTTP.
+
+`retrieval` for a document over `FULL_CONTEXT_TOKENS` (`ranked`). Shape from `test/integration/retrieval.test.ts`
+(not captured over HTTP; ids and numbers illustrative); a follow-up's `debug.query.text` also carries the previous question:
+
+```json
+{"mode": "ranked",
+ "passageIds": ["9a1c…", "4be0…", "c27f…"], "passageOrdinals": [15, 16, 17],
+ "hits": [{"passageId": "4be0…", "ordinal": 16, "rank": 1, "score": 0.1}],
+ "tokenEstimate": 412, "documentTokens": 9035,
+ "debug": {"query": {"text": "Which universities lent lenses?", "tsquery": "'univers' | 'lent' | 'lens'"},
+           "notFoundReason": null, "dropped": []}}
 ```
 
 Assistant message, `completed` but not answerable. Shape from `src/jobs/generateAnswer.ts` and
@@ -192,7 +208,7 @@ Errors: `404 not_found`.
 | `error` | `{code, message}` when `failed`, else `null`. |
 | `attempts` | Model attempts so far (retries up to 3). |
 | `model`, `usage` | Model id and the provider's token usage, as reported. |
-| `retrieval` | What was sent to the model: `mode` (`full` = whole document, `fallback` = leading passages only, `ranked` = search results, planned), `passageOrdinals`, token estimates. `debug` is for diagnosis, not a stable contract. `null` until `completed`. |
+| `retrieval` | What was sent to the model. `mode`: `full` (the whole document fits `FULL_CONTEXT_TOKENS`, no search), `ranked` (larger document: full-text search hits plus their neighbour passages), `fallback` (larger document but nothing to search for or no hits, e.g. a stopword-only question: the leading passages). `passageIds` / `passageOrdinals`: the passages sent, in document order (ordinal = position in the document, from 0). `hits`: search results best first, `{passageId, ordinal, rank (1-based), score}`; `[]` unless `ranked`; a hit missing from `passageIds` was cut by the token budget. `tokenEstimate` (sent) and `documentTokens` (whole document) use the `chars / 4` estimate. `debug` (including `debug.query`, the searched text and tsquery, `null` in `full` mode) is for diagnosis, not a stable contract. `null` until `completed`. |
 
 ## Status lifecycles
 

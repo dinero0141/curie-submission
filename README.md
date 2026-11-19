@@ -142,8 +142,8 @@ pnpm typecheck
 ```
 
 Integration tests use the `curie_test` database (created on first Postgres volume init) and fail fast with a hint if
-Postgres or Redis is down. All tests use the fake model. Current result: 180 tests in 13 files pass (114 unit,
-66 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
+Postgres or Redis is down. All tests use the fake model. Current result: 207 tests in 14 files pass (128 unit,
+79 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
 
 `pnpm spike` (`scripts/spike-citations.ts`) dumps raw Citations responses for the sample document and needs an
 Anthropic key. `pnpm eval` is planned (Task 12); `scripts/eval.ts` does not exist yet.
@@ -153,7 +153,7 @@ Anthropic key. `pnpm eval` is planned (Task 12); `scripts/eval.ts` does not exis
 This build had **no Anthropic API key** (a deliberate decision to continue keyless). So:
 
 Verified:
-- `pnpm typecheck` and `pnpm test`: 180/180 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
+- `pnpm typecheck` and `pnpm test`: 207/207 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
   workers in the integration tests.
 - The example flow above, over HTTP against the compose stack with `MODEL_PROVIDER=fake`: upload → ready → ask →
   poll → follow-up → offsets slice the stored content; plus 400/404/409/415 responses and a failed document
@@ -169,8 +169,9 @@ Not verified:
   is not in the document.
 - `pnpm spike` and `pnpm eval` have not been run; answer quality, `NOT_IN_DOCUMENT:` adherence and real latency are
   unknown. Real API error bodies (over-long prompt, 529, refusal) were not observed.
-- Documents larger than `FULL_CONTEXT_TOKENS` currently get only their leading passages (`fallback`); ranked
-  retrieval is in progress (plan Task 11).
+- Ranked retrieval for documents larger than `FULL_CONTEXT_TOKENS` is tested against real Postgres full-text
+  search on a synthetic document, with `FakeModel` only; it has not been tried with the real model or a real long
+  paper (the sample document is small enough to be sent whole).
 - `docker compose up` with `MODEL_PROVIDER=anthropic`, a `.env` overriding the `fake` default, load, and many
   concurrent workers/pollers.
 

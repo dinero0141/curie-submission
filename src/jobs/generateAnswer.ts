@@ -23,9 +23,16 @@ import {
   writePartialContent,
   type MessageRow,
 } from '../db/messages.js';
-import { listPassages } from '../db/passages.js';
+import { getPassagesByOrdinals, listPassages, type PassageRow } from '../db/passages.js';
+import { listPassageIndex, searchPassages, type SearchOutcome } from '../db/search.js';
 import { resolveCitations } from '../domain/citations.js';
-import { selectPassages } from '../domain/retrieval.js';
+import {
+  RANKED_TOP_K,
+  fitsFullContext,
+  retrievalQueryText,
+  selectPassages,
+  type RetrievalResult,
+} from '../domain/retrieval.js';
 import { classifyError } from '../llm/errors.js';
 import { buildRequest } from '../llm/prompt.js';
 import type { AnswerModel } from '../llm/types.js';
@@ -108,6 +115,8 @@ type AnswerContext = {
   documentTitle: string;
   content: string;
   question: string;
+  /** The user question before `question` in this conversation, if any (for the retrieval query). */
+  previousQuestion: string | null;
   history: MessageRow[];
   documentId: string;
 };
@@ -122,13 +131,40 @@ async function loadContext(pool: pg.Pool, msg: MessageRow): Promise<AnswerContex
   const messages = await listMessages(pool, msg.conversationId);
   const user = messages.find((m) => m.seq === msg.seq - 1);
   if (!user || user.role !== 'user') throw new AnswerContextError(`no question before message ${msg.id}`);
+  const previous = messages.filter((m) => m.role === 'user' && m.seq < user.seq).at(-1);
   return {
     documentTitle: doc.title,
     content: doc.content,
     question: user.content,
+    previousQuestion: previous?.content ?? null,
     history: messages.filter((m) => m.seq < msg.seq),
     documentId: doc.id,
   };
+}
+
+/**
+ * Pick the passages for this answer. A document within `fullContextTokens` is sent whole (no search);
+ * a larger one is searched with the current + previous question (`ranked`, or `fallback` without hits).
+ * Only the selected passages' text is loaded for a large document.
+ */
+async function retrieve(
+  pool: pg.Pool,
+  ctx: AnswerContext,
+  fullContextTokens: number,
+): Promise<{ retrieval: RetrievalResult<PassageRow>; search: (SearchOutcome & { text: string }) | null }> {
+  const opts = { fullContextTokens };
+  const index = await listPassageIndex(pool, ctx.documentId);
+  if (fitsFullContext(index, opts)) {
+    return { retrieval: selectPassages(await listPassages(pool, ctx.documentId), opts), search: null };
+  }
+  const text = retrievalQueryText(ctx.question, ctx.previousQuestion);
+  const search = await searchPassages(pool, ctx.documentId, text, RANKED_TOP_K);
+  const chosen = selectPassages(index, opts, search.hits);
+  const rows = await getPassagesByOrdinals(pool, ctx.documentId, chosen.passages.map((p) => p.ordinal));
+  if (rows.length !== chosen.passages.length) {
+    throw new AnswerContextError(`passages of document ${ctx.documentId} changed during retrieval`);
+  }
+  return { retrieval: { ...chosen, passages: rows }, search: { ...search, text } };
 }
 
 export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
@@ -147,8 +183,7 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
       const ctx = await loadContext(deps.pool, msg);
       if (ctx === 'missing') return { outcome: 'skipped', reason: 'missing' };
 
-      const passages = await listPassages(deps.pool, ctx.documentId);
-      const retrieval = selectPassages(passages, { fullContextTokens: deps.fullContextTokens });
+      const { retrieval, search } = await retrieve(deps.pool, ctx, deps.fullContextTokens);
       const request = buildRequest({
         documentTitle: ctx.documentTitle,
         content: ctx.content,
@@ -176,10 +211,13 @@ export function createGenerateAnswerProcessor(deps: GenerateAnswerDeps) {
         citations: resolved.citations,
         retrieval: {
           mode: retrieval.mode,
+          passageIds: retrieval.passages.map((p) => p.id),
           passageOrdinals: retrieval.passages.map((p) => p.ordinal),
+          hits: retrieval.hits,
           tokenEstimate: retrieval.tokenEstimate,
           documentTokens: retrieval.documentTokens,
           debug: {
+            query: search ? { text: search.text, tsquery: search.tsquery } : null,
             notFoundReason: resolved.notFoundReason,
             // The displayed text is the model text when answerable; keep the raw text only when it differs.
             ...(resolved.answerable ? {} : { rawText: resolved.rawText }),

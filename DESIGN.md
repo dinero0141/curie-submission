@@ -4,7 +4,7 @@ Design, decisions and status of the chat-with-a-document backend. Running it: [R
 shapes, statuses and error codes: [docs/API.md](docs/API.md). Assumed Claude Citations shapes:
 [docs/notes/citations-spike.md](docs/notes/citations-spike.md).
 
-> Status: draft (plan Task 10). Ranked retrieval (Task 11) and the live eval (Task 12) are not done yet; this build
+> Status: draft (plan Task 10, retrieval updated in Task 11). The live eval (Task 12) is not done yet; this build
 > never called the real Claude API (no key). See [Complete vs remaining](#complete-vs-remaining) and
 > [Verification](#verification).
 
@@ -61,8 +61,16 @@ shapes, statuses and error codes: [docs/API.md](docs/API.md). Assumed Claude Cit
 - Known limitations: abbreviation splits ("e.g. foo") can cut a sentence in two. This does no harm here because a citation may span consecutive blocks, so the quote still covers both pieces. Not supported: lazy-continuation edge cases, nested-quote nesting levels, indented code blocks, HTML blocks, YAML front matter (it becomes a setext heading plus text). The token estimate undercounts CJK, where one char is about one token. A real tokenizer would be the next step if CJK papers matter.
 
 ## Retrieval
-- Implemented (Task 8): `selectPassages` (`src/domain/retrieval.ts`, pure) sends every passage in document order when the document's token estimate fits `FULL_CONTEXT_TOKENS` (`full`), otherwise the leading passages up to that budget (`fallback`, always at least one). What was sent is stored on the answer (`retrieval: {mode, passageOrdinals, tokenEstimate, documentTokens, debug}`).
-- Planned (Task 11, not implemented yet): `ranked` mode for documents over the budget. Query = current question OR'ed with the previous user question (a follow-up like "And keyword search?" has almost no terms of its own), built as `to_tsquery('simple', replace(plainto_tsquery('english', q)::text, ' & ', ' | '))`: stemmed once by the `english` config, then parsed with `simple` so the stems are not stemmed again (the plan review caught that double stemming). `ts_rank_cd` top 8 over the stored `tsvector` + GIN index, plus ±1 neighbour passages for context, capped at the budget, sent in document order. No matching terms (stop words only) → the leading passages (`fallback`). Until Task 11 lands, a document over the budget is answered from its leading passages only.
+- Three modes, chosen per answer by the generate-answer processor (`retrieve` in `src/jobs/generateAnswer.ts`). The policy is pure (`src/domain/retrieval.ts`, unit-tested first); the SQL is in `src/db/search.ts`.
+  - `full`: the document's summed token estimate is at most `FULL_CONTEXT_TOKENS` → every passage, in document order, no search.
+  - `ranked` (Task 11): a larger document is searched. Only a light index (`id, ordinal, token_estimate`) is read to decide; the text of the selected passages is loaded afterwards by ordinal.
+  - `fallback`: a larger document with nothing to search for (stopword-only question) or no hits → the leading passages up to the budget. Every mode sends at least one passage.
+- Query text = current question + the previous user question in the conversation, so a follow-up like "And how long did it take?" (nearly all stop words) still carries the earlier question's terms (tested).
+- OR tsquery: `to_tsquery('simple', replace(plainto_tsquery('english', q)::text, ' & ', ' | '))`. `plainto_tsquery` parses free text safely (tsquery syntax typed by the user is treated as words; tested), drops stop words and stems once; `&` → `|` because a question rarely shares every term with the right passage; the second parse with `simple` keeps the stems as they are. Parsing again with `english` would stem twice (`universities` → `univers` → `univ`) and miss; the plan review caught this, and an integration test pins it (the double-stemmed query finds nothing in the test document, ours finds the passage). Side effect seen in testing: `simple` turns a hyphenated lexeme with stop-word parts (`'state-of-the-art'`) into a phrase including `of`/`the`, which cannot match an `english` tsvector; the parts (`'state' | 'art'`) are separate OR branches and still match (tested). A `::tsquery` cast of the first pass's text would avoid that re-parse entirely; we kept the planned form because it is tested and the artefact is harmless. `numnode(q) = 0` → `fallback`.
+- Ranking: `ts_rank_cd` (cover density) over the stored `tsvector` (GIN index), ties by document order, top 8 (`RANKED_TOP_K`).
+- Selection under the budget (`FULL_CONTEXT_TOKENS` again): first the hits in rank order (the first one even if it alone is over the budget), then the ±1 neighbours of the hits that made it in, also in rank order; a passage that does not fit is skipped and smaller later ones may still be added; duplicates are dropped; the result is sent in document order. Hits come first because a neighbour only adds context, while a hit may hold the answer. With 8 hits of about 400 tokens plus 16 neighbours (about 10k tokens) the 60k budget rarely binds; tests use small budgets to exercise the cap.
+- Recorded on the answer (`messages.retrieval`): `mode`, `passageIds` and `passageOrdinals` (what was sent), `hits` (`{passageId, ordinal, rank, score}`, best first, including hits cut by the budget), `tokenEstimate`, `documentTokens`, and in `debug` the searched text and tsquery. That makes "why did it answer from this passage" answerable after the fact.
+- Not verified: ranked mode against the real model (all tests use `FakeModel`; the planned live eval uses only the sample, which is `full`), or on a real long paper. Non-adjacent passages are sent as separate custom-content documents, so a citation cannot span a gap between them ([citations-spike.md](docs/notes/citations-spike.md), contiguity).
 - Why "whole document when it fits" first: for one selected document, the best retrieval is no retrieval. The sample (416 estimated tokens) fits easily, and so should a typical research paper of 5–15k words (roughly 30–100k characters against a 60k-token / about 240k-character budget; not yet tried with a real paper), so the model sees everything and there is no recall problem to defend. Retrieval quality only matters for long documents.
 - Why lexical (Postgres full-text search) for long documents: Claude has no embeddings API, and adding a second provider plus a vector index for single-document Q&A is more moving parts than the problem needs. FTS is deterministic and explainable (we can show why a passage was chosen), lives in the database we already run, and the `tsvector` is computed once at write time. Research questions tend to reuse the document's own terms (names, metrics, dates). Its known weakness is vocabulary mismatch: a question phrased with synonyms the document does not use ranks the right passage low. Mitigations in the design: the previous question in the query, neighbour passages, generous top-k; next steps would be query expansion by a cheap model call, or hybrid lexical + embedding ranking with `pgvector` if a second provider is acceptable. Grounding does not depend on retrieval quality: a missed passage yields "not found" (or a weaker answer), never a quote from outside the document.
 - Full-length papers and limits:
@@ -135,7 +143,7 @@ The plan ([docs/plans/20261119-curie-doc-chat-backend.md](docs/plans/20261119-cu
 3. Citation mapping, then the model adapter, both as pure, unit-tested code.
 4. Document API + worker, then conversations + answers: the thin end-to-end path (Task 8) before failure handling, so the riskiest integration was working early.
 5. Failure handling and the reconciler on top of a working path.
-6. Docs draft (this task) before ranked retrieval and the live eval, so documentation is not squeezed at the end; Task 11 (ranked retrieval) and Task 12 (live eval, needs a key) come after.
+6. Docs draft (Task 10) before ranked retrieval and the live eval, so documentation is not squeezed at the end; Task 11 (ranked retrieval) and Task 12 (live eval, needs a key) come after.
 
 Time log. "Agent-reported" is what each task agent wrote next to its plan header. "Commit" is the wall-clock time of the task's commit, and the gap since the previous commit; that is the measured figure and it is lower than the agents' own estimates.
 
@@ -151,22 +159,23 @@ Time log. "Agent-reported" is what each task agent wrote next to its plan header
 | 7 Document API + worker | 25 | ~20 | 17:31 (7) |
 | 8 Conversations, thin path, Docker | 30 | ~25 | 17:40 (9) |
 | 9 Failure handling + reconciler | 20 | ~20 | 17:46 (6) |
-| 10 Docs draft | 35 | ~20 | this commit |
+| 10 Docs draft | 35 | ~20 | 17:55 (9) |
+| 11 Ranked retrieval | 20 | ~20 | this commit |
 | Tasks 1–9 total | 185 min | ~200 min | 96 min (16:10–17:46) |
 
 Time before the plan commit (brainstorm, plan review) and the human's own review time are not in this table.
 
 ## Complete vs remaining
-Complete (Tasks 1–9, tested with the fake model):
+Complete (Tasks 1–9 and 11, tested with the fake model):
 - Add Markdown or plain-text documents; asynchronous preparation with `ready`, or `failed` plus a reason code.
 - Multi-turn conversations about one document; one answer in flight per conversation, enforced by the database.
 - Answers grounded through Citations over sentence blocks; every quote re-verified against the stored content and located by UTF-16 offsets; explicit not-found (`answerable: false`).
 - Progressive polling with partial content while streaming.
+- Retrieval: whole document when it fits the budget, otherwise ranked full-text search (current + previous question, OR tsquery, top 8 + neighbours), leading passages when there is nothing to search for.
 - Failure classification, retries, processor-owned terminal state, reconciler for lost and stalled jobs.
 - Docker Compose for the whole stack; README, this file, the API spec.
 
 Remaining in the plan:
-- Task 11: ranked retrieval for documents over the budget (until then: leading passages only).
 - Task 12: live eval against Claude; needs an API key. `scripts/eval.ts` is not written yet.
 - Task 13: acceptance check and a fresh-clone run of the README. Task 14: final docs.
 - Task 15 (stretch): SSE over Redis Streams.
@@ -179,20 +188,20 @@ Next steps beyond the plan:
 - A real tokenizer for budgets (CJK); PDF via a converter; `DELETE /documents/:id`; pagination of `GET /documents`.
 
 ## Verification
-Automated (`pnpm test`: 180 tests, 13 files, all passing; `pnpm typecheck` clean):
+Automated (`pnpm test`: 207 tests, 14 files, all passing; `pnpm typecheck` clean):
 
 | Level | Files | Tests | What and why |
 |---|---|---|---|
-| Unit, pure domain | `chunking`, `citations`, `retrieval` | 19 + 22 + 4 | Where correctness is decided: span invariants on every fixture (CRLF, emoji/CJK surrogates, 5,000-char sentence, syntax-only input), citation mapping including forged `cited_text`, out-of-range and inclusive-`end` misreadings, UTF-16 offsets. Written test-first. |
+| Unit, pure domain | `chunking`, `citations`, `retrieval` | 19 + 22 + 18 | Where correctness is decided: span invariants on every fixture (CRLF, emoji/CJK surrogates, 5,000-char sentence, syntax-only input), citation mapping including forged `cited_text`, out-of-range and inclusive-`end` misreadings, UTF-16 offsets; retrieval query text, mode by token total, neighbours, dedupe, budget cap, document order. Written test-first. |
 | Unit, model boundary | `prompt`, `llm-errors`, `anthropic-model`, `fake-model` | 50 | Exact expected request body for a small document (stands in for the missing live call); real SDK error instances; the real SDK client driven through a stubbed `fetch` with SSE events written from the assumed shapes. |
 | Unit, config | `config`, `loadEnv` | 14 + 5 | Defaults, invalid values, key required unless fake; dotenv loading never overrides the shell. |
-| Integration | `db`, `documents`, `conversations`, `failures` | 13 + 22 + 15 + 16 | Real Postgres, Redis and BullMQ workers in-process, `fastify.inject`, `FakeModel`. The risks here are constraints (`one_inflight_answer`, guarded transitions), BullMQ semantics (`attemptsMade` pinned on 6.7.7), timing (a latched model shows partial content and the 409), retries and the reconciler; mocks would hide exactly these. |
+| Integration | `db`, `documents`, `conversations`, `failures`, `retrieval` | 13 + 22 + 15 + 16 + 13 | Real Postgres, Redis and BullMQ workers in-process, `fastify.inject`, `FakeModel`. The risks here are constraints (`one_inflight_answer`, guarded transitions), BullMQ semantics (`attemptsMade` pinned on 6.7.7), timing (a latched model shows partial content and the 409), retries and the reconciler; mocks would hide exactly these. `retrieval` runs the real Postgres text search on a synthetic over-budget document (filler + needle sections): needle + neighbours, double-stemming trap, hyphenated terms, stopword-only → `fallback`, sample → `full`, and what the processor records and sends. |
 
 `FakeModel` replaces the network: scripted replies by question, per-attempt errors, a latch to hold an answer mid-stream, and every request recorded so tests can assert what history was sent. Its citations go through the same verification as real ones.
 
 Manual checks ([docs/notes/manual-checks.md](docs/notes/manual-checks.md)): the compose stack with `MODEL_PROVIDER=fake`, the curl flow from upload to follow-up, offsets sliced against `GET /documents/:id/content`, error responses, clean shutdown. In Task 10 the README example flow was run again against a freshly built stack, plus a failed document (`empty_after_parse`) and the 409 for asking about it.
 
-Not verified: no real Claude call (shapes assumed, spike and eval not run), real error bodies, `ranked` mode (not built), a real full-length paper, a dotenv value overriding the compose default, load and concurrency, a worker crash mid-job (BullMQ stalled-job path). Details in [README § Verification status](README.md#verification-status).
+Not verified: no real Claude call (shapes assumed, spike and eval not run), real error bodies, `ranked` mode against the real model (tested only with `FakeModel` on a synthetic document), a real full-length paper, a dotenv value overriding the compose default, load and concurrency, a worker crash mid-job (BullMQ stalled-job path). Details in [README § Verification status](README.md#verification-status).
 
 ## AI use
 - Tools: Claude Code. The design came from a Claude Code brainstorm session in which the human made each choice: Anthropic as the only provider (hence lexical retrieval); a persisted job with SSE and polling, later reduced to progressive polling with SSE as a stretch goal after the plan review; Claude Citations over sentence blocks, over model-written quotes with fuzzy matching and over sending the whole document every time.
