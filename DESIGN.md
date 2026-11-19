@@ -1,10 +1,43 @@
 # Curie — design
 
-> Skeleton; sections fill in as decisions are made during implementation.
+Design, decisions and status of the chat-with-a-document backend. Running it: [README.md](README.md). Endpoints,
+shapes, statuses and error codes: [docs/API.md](docs/API.md). Assumed Claude Citations shapes:
+[docs/notes/citations-spike.md](docs/notes/citations-spike.md).
+
+> Status: draft (plan Task 10). Ranked retrieval (Task 11) and the live eval (Task 12) are not done yet; this build
+> never called the real Claude API (no key). See [Complete vs remaining](#complete-vs-remaining) and
+> [Verification](#verification).
 
 ## Assumptions
+- One user, no authentication (sketch under [Access control](#access-control)).
+- Input is Markdown or plain text sent as a JSON string, up to 5 MB of UTF-8. PDF is out of scope; it would be a
+  converter in the prepare step that produces text under the same offset contract.
+- A document is immutable after upload; a new version is a new document. That keeps every stored offset valid.
+- A conversation is about exactly one document, fixed when it is created.
+- "Based only on the document" means: an answer is shown as answerable only if it carries at least one quotation
+  that we verified against the stored text. Otherwise the client gets an explicit not-found result.
+- English-language documents for retrieval quality (Postgres `english` text search, `Intl.Segmenter('en')`); other
+  languages chunk correctly but are not stemmed.
+- Claude (Anthropic) is the only model provider. It has no embeddings API, so retrieval is lexical.
+- An answer may take seconds to tens of seconds; the client polls and sees partial text meanwhile.
 
 ## Architecture
+- Overview:
+
+  ```
+  client ──HTTP──> api (Fastify) ──SQL──> Postgres: documents, passages, conversations, messages
+                     │ enqueue (job id = row id)                ^
+                     v                                          │ status, partial content, results
+                   Redis (BullMQ: prepare-document, generate-answer)
+                     │                                          │
+                     v                                          │
+                   worker: chunking │ passage selection │ Claude (streamed, Citations) │ verification
+                     └─ reconciler (on start + every 60 s)
+  ```
+
+  The API validates, writes rows and enqueues; it never chunks or calls the model. The worker does the slow work and
+  writes results to the rows the client polls. Postgres rows are the source of truth; Redis holds only jobs, so a lost
+  job is recoverable from the row (reconciler).
 - Configuration comes only from the process environment (`loadConfig(env)` is pure and unit-tested). For local runs, entrypoints and scripts first call `loadEnvFile()` (`src/loadEnv.ts`), which uses Node's built-in `process.loadEnvFile` when the repo-root dotenv file exists: no `dotenv` dependency, no `--env-file` flags in package scripts, shell variables always win (guarded by a snapshot, not only Node's default), and a missing or unreadable file is not an error. Tests never call it, so a developer's local file cannot change test results.
 - Document API (`src/http/routes/documents.ts`): `POST /documents` takes JSON `{title, format, content}` only (a raw `text/markdown` body is a 415), stores the row as `pending`, enqueues `prepare-document` with `jobId = documentId` and answers 202; chunking never runs in the request. Rejected up front: empty/whitespace-only content (`empty_document`), unknown format (`invalid_request`), NUL characters and unpaired UTF-16 surrogates (`invalid_content`: Postgres cannot store NUL, and a lone surrogate would be rewritten to U+FFFD on the way to UTF-8). Size is checked as `Buffer.byteLength(content)` against `MAX_DOCUMENT_BYTES` (`document_too_large`), with Fastify's `bodyLimit` at 1.5x as the outer guard (`payload_too_large`). Malformed ids are a 404 like unknown ids (never a Postgres cast error). `GET /documents/:id/content` returns the stored string in JSON, because every offset is an index into exactly that string.
 - Enqueueing on the request path is bounded (2 s): the `pending` row is the source of truth, so a slow or failed enqueue is logged and the reconciler enqueues stale `pending` documents later. The client still gets 202 instead of a hung or failed request. Re-enqueueing is safe because the job id is the document id.
@@ -28,7 +61,16 @@
 - Known limitations: abbreviation splits ("e.g. foo") can cut a sentence in two. This does no harm here because a citation may span consecutive blocks, so the quote still covers both pieces. Not supported: lazy-continuation edge cases, nested-quote nesting levels, indented code blocks, HTML blocks, YAML front matter (it becomes a setext heading plus text). The token estimate undercounts CJK, where one char is about one token. A real tokenizer would be the next step if CJK papers matter.
 
 ## Retrieval
-- Interim (Task 8): `selectPassages` (`src/domain/retrieval.ts`, pure) sends every passage in document order when the document's token estimate fits `FULL_CONTEXT_TOKENS` (`full`), otherwise the leading passages up to that budget (`fallback`, always at least one). Ranked lexical retrieval for documents over the budget replaces the leading-passages path in Task 11. What was sent is stored on the answer (`retrieval: {mode, passageOrdinals, tokenEstimate, documentTokens, debug}`).
+- Implemented (Task 8): `selectPassages` (`src/domain/retrieval.ts`, pure) sends every passage in document order when the document's token estimate fits `FULL_CONTEXT_TOKENS` (`full`), otherwise the leading passages up to that budget (`fallback`, always at least one). What was sent is stored on the answer (`retrieval: {mode, passageOrdinals, tokenEstimate, documentTokens, debug}`).
+- Planned (Task 11, not implemented yet): `ranked` mode for documents over the budget. Query = current question OR'ed with the previous user question (a follow-up like "And keyword search?" has almost no terms of its own), built as `to_tsquery('simple', replace(plainto_tsquery('english', q)::text, ' & ', ' | '))`: stemmed once by the `english` config, then parsed with `simple` so the stems are not stemmed again (the plan review caught that double stemming). `ts_rank_cd` top 8 over the stored `tsvector` + GIN index, plus ±1 neighbour passages for context, capped at the budget, sent in document order. No matching terms (stop words only) → the leading passages (`fallback`). Until Task 11 lands, a document over the budget is answered from its leading passages only.
+- Why "whole document when it fits" first: for one selected document, the best retrieval is no retrieval. The sample (416 estimated tokens) fits easily, and so should a typical research paper of 5–15k words (roughly 30–100k characters against a 60k-token / about 240k-character budget; not yet tried with a real paper), so the model sees everything and there is no recall problem to defend. Retrieval quality only matters for long documents.
+- Why lexical (Postgres full-text search) for long documents: Claude has no embeddings API, and adding a second provider plus a vector index for single-document Q&A is more moving parts than the problem needs. FTS is deterministic and explainable (we can show why a passage was chosen), lives in the database we already run, and the `tsvector` is computed once at write time. Research questions tend to reuse the document's own terms (names, metrics, dates). Its known weakness is vocabulary mismatch: a question phrased with synonyms the document does not use ranks the right passage low. Mitigations in the design: the previous question in the query, neighbour passages, generous top-k; next steps would be query expansion by a cheap model call, or hybrid lexical + embedding ranking with `pgvector` if a second provider is acceptable. Grounding does not depend on retrieval quality: a missed passage yields "not found" (or a weaker answer), never a quote from outside the document.
+- Full-length papers and limits:
+  - Upload: 5 MB of UTF-8 (`MAX_DOCUMENT_BYTES`), about 1.3M estimated tokens / 3,300 passages; chunking 5 MB takes about 160 ms.
+  - Per question: at most `FULL_CONTEXT_TOKENS` (60k, estimated as `chars / 4`) of passages, plus the system prompt, up to 6 earlier turns as text, and `MAX_ANSWER_TOKENS + 4096` output tokens. 60k is a cost and latency choice, well below the model's context window; it can be raised by config.
+  - If the API still rejects the prompt as too long, the answer fails permanently with `context_too_large`.
+  - The `chars / 4` estimate undercounts CJK text (about one token per character), so a CJK document can send more tokens than the budget suggests.
+  - Unknown: how many custom-content documents or blocks one request may carry (not stated in the docs or SDK types; [citations-spike.md](docs/notes/citations-spike.md) fact 15). A 60k-token document is about 150 passages, so about 150 documents and several thousand sentence blocks in one request; this is unverified. If it hits a limit, the planned fallback is one document per run of adjacent passages.
 
 ## Grounding and citations
 - Citations API shapes (custom-content documents, `content_block_location` with exclusive `end_block_index`, `citations_delta` folded into `finalMessage()`) come from the claude-api skill and the `@anthropic-ai/sdk` 1.10.0 types. They are **assumed, not observed live**: the build had no API key. `docs/notes/citations-spike.md` lists each fact with its source. `pnpm spike` is the check still to run. The code does not trust these shapes: indices are range-checked and every quote is rebuilt from `content.slice` and verified block by block, so a wrong assumption drops citations rather than showing wrong quotes.
@@ -47,6 +89,8 @@
 
 ## Answer delivery
 - Progressive polling: `GET /messages/:id` is the source of truth. The generate-answer processor (`src/jobs/generateAnswer.ts`) moves the message to `streaming` (clearing content left by a stalled run), and while the model streams, a small `PartialWriter` coalesces deltas into at most one `content` write per 400 ms. Writes are serialized and `stop()` waits for the one in flight, so the single final update (content, answerable, citations, retrieval, usage, model, finish_reason, completed_at) always lands last. A failed partial write is logged and skipped. Partial text is the raw model text: citations, and the switch to the not-found message, appear only with `completed`, so a client should treat streaming text as provisional.
+- Why polling, not streaming, for now: the answer outlives any one HTTP request. With polling the client needs only `GET /messages/:id`, which works the same during generation, after a reconnect, after a worker retry and after completion, and there is no second source of truth to keep consistent with the row. The cost is latency granularity (partial text every ~400 ms plus the poll interval) and some extra GETs, which is acceptable for answers that take seconds.
+- Next step, SSE (plan Task 15, stretch, not built): the worker also appends `start {runId}` (on every attempt, so a client drops text from a failed attempt), `delta` and, only after the DB commit, `completed`/`failed` events to a Redis Stream per message (expiry 1 h). `GET /messages/:id/events` replays from `Last-Event-ID` (or the start) with `XREAD BLOCK`, or sends one final event if the row is already terminal. Polling stays the fallback and the source of truth.
 - The processor reads the question as the user message at `seq - 1` and history as everything before it; `buildRequest` keeps only completed turns. The final-state rule is applied the same way as for documents (permanent → `failed` + `UnrecoverableError`; retryable → `failed` only on the last attempt); a missing question or a non-ready document is a permanent `internal_error`.
 
 ## Failure handling
@@ -73,15 +117,94 @@
 - Reconciler (`src/jobs/reconciler.ts`, runs in the worker on start and every 60 s): in-flight rows (`documents` pending/processing, assistant `messages` pending/streaming) untouched for 2 min are checked against `queue.getJob(rowId)`: no job → enqueue (covers a lost request-path enqueue or a removed job); job `failed` → row `failed/stalled` with the job's `failedReason`; job `completed` with the row still in flight → `failed/stalled`; active/waiting/delayed/prioritized → left alone. An active answer stays fresh because partial writes bump `updated_at`. Writes are the same SQL-guarded transitions as the processors use, so a job finishing at the same moment cannot be overwritten. Passes never overlap (`runOnce` shares a pass in progress) and errors are logged per row. The thresholds are options, so tests run it with aged rows instead of waiting. Polling Postgres was chosen over a transactional outbox: it is less code and also covers jobs that BullMQ lost or failed outside our processor.
 
 ## Alternatives considered
+- **Model-written quotes + fuzzy matching** (ask for answer + quotes as JSON, then find each quote in the document): rejected. Models paraphrase "quotes"; fuzzy matching then either rejects good answers or accepts text that is not in the document, and the match offsets are a guess. With Citations over our own sentence blocks the model only points at blocks, and the quote is our own `content.slice`, so it is in the document by construction. Cost: we depend on the Citations response shape, which is unverified here (see [Grounding and citations](#grounding-and-citations)).
+- **Whole document always**: simplest, and it is our `full` mode, but it has no answer for documents over the context budget.
+- **Embeddings / vector search**: no Anthropic embeddings API; a second provider and `pgvector` for one-document Q&A was not worth it in 4 hours (see [Retrieval](#retrieval)).
+- **Streaming the answer inline from `POST` (SSE on the request)**: ties the answer to one socket; a dropped connection or a worker retry loses it, and the model call would run in the request path. Rejected for a persisted job plus polling (SSE from a stream as a later addition).
+- **Redis pub/sub for streaming**: no replay, and a subscriber that connects after the first deltas misses them. Redis Streams were chosen for the SSE design instead.
+- **`worker.on('failed')` for terminal state**: fires on every failed attempt (not only the last), is not awaited, and does not cover stalled jobs. The processor owns terminal state instead (see [Failure handling](#failure-handling)).
+- **Transactional outbox** for enqueueing: a reconciler that polls in-flight rows is less code here and also recovers jobs that were enqueued and then lost.
+- **ORM**: the full-text search SQL is raw anyway, and four tables do not need one.
+- **CommonMark parser for chunking**: we would still need the masking and trimming for exact sentence spans on top (see [Document preparation](#document-preparation-chunking)).
 
 ## Implementation plan and time log
+The plan ([docs/plans/20261119-curie-doc-chat-backend.md](docs/plans/20261119-curie-doc-chat-backend.md)) splits the work into small tasks, each ending in a commit with passing tests. Order and why:
+
+1. Scaffold, schema, chunking first: offsets and sentence spans are the contract everything else depends on, so they were built and tested before any model code.
+2. Citations spike before citation code: the Citations shapes decide the mapping. Without a key, the spike became a documented set of assumptions, and the mapping was written defensively against them.
+3. Citation mapping, then the model adapter, both as pure, unit-tested code.
+4. Document API + worker, then conversations + answers: the thin end-to-end path (Task 8) before failure handling, so the riskiest integration was working early.
+5. Failure handling and the reconciler on top of a working path.
+6. Docs draft (this task) before ranked retrieval and the live eval, so documentation is not squeezed at the end; Task 11 (ranked retrieval) and Task 12 (live eval, needs a key) come after.
+
+Time log. "Agent-reported" is what each task agent wrote next to its plan header. "Commit" is the wall-clock time of the task's commit, and the gap since the previous commit; that is the measured figure and it is lower than the agents' own estimates.
+
+| Task | Plan estimate | Agent-reported | Commit (gap) |
+|---|---|---|---|
+| Design brainstorm + plan + automated plan review | — | not recorded | plan committed 16:10 |
+| 1 Scaffold | 15 min | ~35 min (incl. disk-full stop) | 16:46 (36 min) |
+| 2 Schema + repositories | 10 | ~15 | 16:50 (4) |
+| 3 Chunking | 30 | ~25 | 16:56 (6) |
+| 4 Citations spike (keyless) | 10 | ~25 over two runs | 17:02, 17:11 (15) |
+| 5 Citation mapping | 20 | ~10 | 17:14 (3) |
+| 6 Model integration | 25 | ~25 | 17:24 (10) |
+| 7 Document API + worker | 25 | ~20 | 17:31 (7) |
+| 8 Conversations, thin path, Docker | 30 | ~25 | 17:40 (9) |
+| 9 Failure handling + reconciler | 20 | ~20 | 17:46 (6) |
+| 10 Docs draft | 35 | ~20 | this commit |
+| Tasks 1–9 total | 185 min | ~200 min | 96 min (16:10–17:46) |
+
+Time before the plan commit (brainstorm, plan review) and the human's own review time are not in this table.
 
 ## Complete vs remaining
+Complete (Tasks 1–9, tested with the fake model):
+- Add Markdown or plain-text documents; asynchronous preparation with `ready`, or `failed` plus a reason code.
+- Multi-turn conversations about one document; one answer in flight per conversation, enforced by the database.
+- Answers grounded through Citations over sentence blocks; every quote re-verified against the stored content and located by UTF-16 offsets; explicit not-found (`answerable: false`).
+- Progressive polling with partial content while streaming.
+- Failure classification, retries, processor-owned terminal state, reconciler for lost and stalled jobs.
+- Docker Compose for the whole stack; README, this file, the API spec.
+
+Remaining in the plan:
+- Task 11: ranked retrieval for documents over the budget (until then: leading passages only).
+- Task 12: live eval against Claude; needs an API key. `scripts/eval.ts` is not written yet.
+- Task 13: acceptance check and a fresh-clone run of the README. Task 14: final docs.
+- Task 15 (stretch): SSE over Redis Streams.
+
+Next steps beyond the plan:
+- Run `pnpm spike` with a key and confirm or fix the assumed Citations shapes; tune `effort` with the eval.
+- Honour `retry-after` on 429/529; enable the server-side refusal fallback once it can be exercised.
+- Prompt caching of the document prefix across follow-ups (cost and latency).
+- Flag or drop uncited sentences in answerable replies.
+- A real tokenizer for budgets (CJK); PDF via a converter; `DELETE /documents/:id`; pagination of `GET /documents`.
 
 ## Verification
+Automated (`pnpm test`: 180 tests, 13 files, all passing; `pnpm typecheck` clean):
+
+| Level | Files | Tests | What and why |
+|---|---|---|---|
+| Unit, pure domain | `chunking`, `citations`, `retrieval` | 19 + 22 + 4 | Where correctness is decided: span invariants on every fixture (CRLF, emoji/CJK surrogates, 5,000-char sentence, syntax-only input), citation mapping including forged `cited_text`, out-of-range and inclusive-`end` misreadings, UTF-16 offsets. Written test-first. |
+| Unit, model boundary | `prompt`, `llm-errors`, `anthropic-model`, `fake-model` | 50 | Exact expected request body for a small document (stands in for the missing live call); real SDK error instances; the real SDK client driven through a stubbed `fetch` with SSE events written from the assumed shapes. |
+| Unit, config | `config`, `loadEnv` | 14 + 5 | Defaults, invalid values, key required unless fake; dotenv loading never overrides the shell. |
+| Integration | `db`, `documents`, `conversations`, `failures` | 13 + 22 + 15 + 16 | Real Postgres, Redis and BullMQ workers in-process, `fastify.inject`, `FakeModel`. The risks here are constraints (`one_inflight_answer`, guarded transitions), BullMQ semantics (`attemptsMade` pinned on 6.7.7), timing (a latched model shows partial content and the 409), retries and the reconciler; mocks would hide exactly these. |
+
+`FakeModel` replaces the network: scripted replies by question, per-attempt errors, a latch to hold an answer mid-stream, and every request recorded so tests can assert what history was sent. Its citations go through the same verification as real ones.
+
+Manual checks ([docs/notes/manual-checks.md](docs/notes/manual-checks.md)): the compose stack with `MODEL_PROVIDER=fake`, the curl flow from upload to follow-up, offsets sliced against `GET /documents/:id/content`, error responses, clean shutdown. In Task 10 the README example flow was run again against a freshly built stack, plus a failed document (`empty_after_parse`) and the 409 for asking about it.
+
+Not verified: no real Claude call (shapes assumed, spike and eval not run), real error bodies, `ranked` mode (not built), a real full-length paper, a dotenv value overriding the compose default, load and concurrency, a worker crash mid-job (BullMQ stalled-job path). Details in [README § Verification status](README.md#verification-status).
 
 ## AI use
+- Tools: Claude Code. The design came from a Claude Code brainstorm session in which the human made each choice: Anthropic as the only provider (hence lexical retrieval); a persisted job with SSE and polling, later reduced to progressive polling with SSE as a stretch goal after the plan review; Claude Citations over sentence blocks, over model-written quotes with fuzzy matching and over sending the whole document every time.
+- The plan file was the task contract. Each task lists its files, checkboxes and tests. Agents mark checkboxes, record additions (➕) and blockers or unverified items (⚠️), and note actual time. An automated plan-review agent read the plan before any code was written and caught: BullMQ's worker `failed` event fires on every attempt, not only the final one, and stalled jobs bypass it (→ the processor owns terminal state); a reconciler re-adding an existing `jobId` is silently ignored by BullMQ (→ the reconciler checks job state first); double stemming in the OR tsquery (→ second pass with the `simple` config); passages with zero sentences would make the API return 400 (→ every passage has at least one sentence); and the plan was about 5 h (→ scope cuts).
+- Delegation: implementation ran as sequential task subagents, one per plan task with a fresh context. Each had to write tests and pass `pnpm test` and `pnpm typecheck` before committing, and log what it did to a progress file. Multi-agent code review phases follow the tasks in the workflow. These documents were drafted by the Task 10 agent from the code, the plan and the manual-check notes.
+- Agent rules: [CLAUDE.md](CLAUDE.md), committed and used as written: the stack, the invariants (UTF-16 `[start, end)` offsets into never-mutated content, slicing only in JS, quotes only from Citations re-verified against `content.slice`, slow work only in workers, the processor owns terminal state, one error envelope), database rules (idempotent migrations, guarded transitions, the test harness) and workflow rules (one task per run, tests for every change, never claim verification that was not run, a DESIGN bullet per decision).
+- How the work was checked: after Tasks 4–9 the orchestrator re-ran `pnpm typecheck` and `pnpm test` itself (180/180 passing, 13 files) instead of trusting the agents' reports. Unverified work had to be marked in the plan, not reported as done.
+- Environment incidents: the disk was full at the start, and the Task 1 agent stopped instead of risking a half install (the human approved clearing the npm cache); Docker Desktop's backend hung and had to be force-restarted; a user hook blocks agents from reading, writing or naming dotenv files, so the app loads its own dotenv file at startup (`src/loadEnv.ts`) and agents never see the key.
+- Keyless run: no Anthropic API key was available and the human chose to continue without one. Hence the assumed Citations shapes, the never-called `AnthropicModel`, the unrun spike and eval, and a test suite that runs only on `FakeModel`. The defensive citation verification means a wrong assumption drops quotes instead of showing wrong ones.
 
 ## Access control
+Not implemented (one user). With authentication, each document gets an `owner_id` (or a `document_members(document_id, user_id, role)` table for shared workspaces). Conversations inherit access from their document, and messages from their conversation. Every route resolves the caller first and filters by it in the same query (`WHERE id = $1 AND owner_id = $2`), answering 404 rather than 403 so ids do not leak. Jobs carry only row ids and run as the system, so the worker needs no change. Retrieval is already scoped to one document id, so a question can never see another user's text.
 
 ## Scaling to many documents (optional)
+Not built. Answering across a million documents changes retrieval, not grounding. Passage preparation stays per document in a horizontally scaled worker pool. Retrieval becomes two-stage: a corpus index (sharded lexical search such as OpenSearch, plus an ANN vector index, since vocabulary mismatch matters more across many authors) returns candidate passages from many documents, then a reranker picks the top few. Those go to Claude as custom-content documents titled with document title and section, so each citation still resolves to one document and offset range and is verified the same way. Access filters must apply inside the index query, not after it. Prepared passages and per-document prompt prefixes become cacheable.

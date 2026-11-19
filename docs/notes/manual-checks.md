@@ -78,3 +78,26 @@ Not seen in this run:
   this checkout and the session's rules forbid creating one. It follows from compose reading that file for `${...}`
   interpolation; shell > file > `fake`.
 - Real-provider compose run (`MODEL_PROVIDER=anthropic`): **not run — no API key (keyless run)**.
+
+## 2026-11-19 — README example flow re-run, `MODEL_PROVIDER=fake` (Task 10, keyless run)
+
+Setup: `docker compose up -d --build --wait` on the Task 9 code (image rebuilt), no dotenv file, so the fake model.
+The six steps of the README "Example flow" were run verbatim from the repo root; their output is the one shown in the
+README (document `ready` with 5 passages, answer `completed` with one citation at `[34, 110)`, four messages in seq
+order, `matches: true` for the offset check).
+
+Extra responses seen in the same run:
+
+```text
+POST /documents {"format":"pdf",…}              → {"error":{"code":"invalid_request","message":"format must be 'markdown' or 'text'"}}
+POST /documents (content-type: text/markdown)   → {"error":{"code":"unsupported_media_type","message":"send the request body as application/json"}}
+GET /documents/not-a-uuid                       → {"error":{"code":"not_found","message":"document not found"}}
+POST /documents {"content":"# only a heading"}  → 202 pending, then GET → "status":"failed","failureCode":"empty_after_parse",
+                                                  "failureMessage":"document has no text content after parsing"
+POST /conversations about that document         → {"error":{"code":"document_not_ready","message":"document is failed (empty_after_parse); wait until its status is ready"}}
+POST /conversations/<unknown uuid>/messages     → {"error":{"code":"not_found","message":"conversation not found"}}
+```
+
+App containers removed afterwards (`docker compose rm -sf api worker migrate`), images and build cache pruned.
+Still not seen over HTTP: a not-found answer (the fake's default answer always cites), partial content while
+`streaming` and `409 answer_in_progress` (the fake answers too fast); all three are covered by integration tests.
