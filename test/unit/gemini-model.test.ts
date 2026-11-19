@@ -1,9 +1,11 @@
 // GeminiModel through a stubbed `fetch` (no network, no API key). Response bodies are written from the ASSUMED
 // generateContent shapes in docs/notes/gemini-notes.md, NOT recorded from the live API. What this proves: the
 // request body we send, the mapping of the structured answer into the RawAnswer shape that resolveCitations
-// verifies unchanged, and error/timeout classification. The live API accepted and answered this request once, in
-// the 2026-11-19 smoke run on gemini-3.5-flash-lite (which facts that confirmed: docs/notes/gemini-notes.md); the
-// failure bodies used here (429, blocks, MAX_TOKENS, ...) remain assumed.
+// verifies unchanged, and error/timeout classification. The 2026-11-19 smoke run had the live API accept and answer
+// the same request shape without `thinkingConfig`, on gemini-3.5-flash-lite (which facts that confirmed:
+// docs/notes/gemini-notes.md). The gemini-3.8-flash body pinned here, with `thinkingLevel: 'low'`, has never been
+// accepted live (that model only returned 503). The failure bodies used here (429, blocks, MAX_TOKENS, ...) remain
+// assumed.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { chunkDocument } from '../../src/domain/chunking.js';

@@ -33,7 +33,8 @@ export const GEMINI_API_VERSION = 'v1beta';
  * Output token headroom on top of `MAX_ANSWER_TOKENS` (`maxOutputTokens` is a hard cap):
  * - structured output: JSON syntax plus a copied `quote` for every citation, roughly the answer length again;
  * - thinking: thought tokens count against `maxOutputTokens` (notes fact 11), and thinking cannot be switched
- *   fully off on Gemini 3+ models, only lowered (the default model, gemini-3.5-flash-lite, runs at `minimal`).
+ *   fully off on Gemini 3+ models, only lowered (the default model, gemini-3.5-flash-lite, defaults to `minimal` per
+ *   Google's thinking page; notes fact 10, UNVERIFIED).
  * Unused headroom costs nothing.
  */
 export const STRUCTURED_OUTPUT_HEADROOM_TOKENS = 2048;

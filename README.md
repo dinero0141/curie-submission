@@ -11,10 +11,8 @@ text while the answer is generated.
 - Recording: **pending** (link to be added before submission; tracked in
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining))
 - Status: complete and tested end to end with a fake model, but **built without an Anthropic API key**: no real
-  Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible:
-  `pnpm smoke` passed 3/3 against the live API on `gemini-3.5-flash-lite` (direct model calls; the HTTP/worker stack
-  and the eval have not run live yet). See
-  [Verification status](#verification-status) and
+  Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible;
+  what has run live: [Verification status](#verification-status); what remains:
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
 - Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–18:20 by commit times; the task
   agents themselves reported ~4 h 45), plus brainstorm/planning before that and code review after (total session
@@ -75,7 +73,7 @@ Stop everything with `docker compose down` (add `-v` to drop the database volume
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_PROVIDER=anthropic` (the app refuses to start without it) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | The request shape (Citations, adaptive thinking, `output_config.effort`) is assumed for the default model. Another model must accept all three; unverified (keyless build) |
 | `GEMINI_API_KEY` | — | Required when `MODEL_PROVIDER=gemini`. Free tier: Google may use prompts to improve its products, so send only documents you may share ([gemini-notes](docs/notes/gemini-notes.md), fact 23) |
-| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Stable free-tier model (a `models/` prefix is stripped), and the only one that answered live: on 2026-11-19 `gemini-3.8-flash` returned 503 UNAVAILABLE "high demand" on every try, and `gemini-2.5-flash-lite` is 404 for new users. `thinkingLevel: low` is sent to Gemini 3+/4 ids only, not to Flash-Lite ids (their default, `minimal`, is lower). Alternatives: `gemini-3.8-flash`, `gemini-4-hydrogen` (not yet answered live) |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Bare model id (a `models/` prefix is stripped). Why this default, the alternatives and which ids get `thinkingLevel: low`: [gemini-notes](docs/notes/gemini-notes.md), facts 10 and 21 |
 | `MAX_ANSWER_TOKENS` | `1024` | Answer budget; Claude adds 4096 tokens of thinking headroom, Gemini adds 2048 (JSON and copied quotes) + 4096 (thinking) |
 | `MODEL_TIMEOUT_MS` | `90000` | Deadline for one answer; a timeout is retried |
 | `FULL_CONTEXT_TOKENS` | `60000` | Documents up to this estimated size are sent whole |
@@ -221,9 +219,8 @@ prototype?" with the keyword turn as history (`followUpOf: 'keyword'`; the docum
 answer did not complete), expecting "34 of the 40". Per question it prints the outcome, the verified
 quotes with offsets, drop reasons, stop reason, model and usage; it exits 1 if an expectation fails and 2 on a
 configuration, HTTP or network error. It refuses `MODEL_PROVIDER=fake` and never prints the key. The checks
-(`scripts/smoke-check.ts`) are unit-tested. **Run live with Gemini on 2026-11-19: 3/3 passed on
-`gemini-3.5-flash-lite`** (output in [manual-checks](docs/notes/manual-checks.md#2026-11-19--live-gemini-smoke-run-gemini-35-flash-lite));
-`gemini-3.8-flash` got 503 "high demand" on the first question every time. Never run with Claude (no key).
+(`scripts/smoke-check.ts`) are unit-tested. Live result: [Verification status](#verification-status). Never run with
+Claude (no key).
 
 ## Eval
 
