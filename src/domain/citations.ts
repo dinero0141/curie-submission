@@ -29,15 +29,17 @@ export const NOT_IN_DOCUMENT_MARKER = 'NOT_IN_DOCUMENT:';
  * letter or digit. Marker adherence of the real model is unknown (spike fact 16), so formatting is tolerated.
  */
 const MARKER_AT_START = /^[\s*_`>#]*NOT_IN_DOCUMENT(?![A-Za-z0-9])/i;
-/** Marker anywhere (e.g. after a one-sentence preamble); only consulted when no citation survived. */
+/** Marker anywhere (e.g. after a one-sentence preamble); only consulted when the model cited nothing at all. */
 const MARKER_ANYWHERE = /(?<![A-Za-z0-9])NOT_IN_DOCUMENT(?![A-Za-z0-9])/i;
 
 /**
- * Whether the reply says the document does not answer the question. With a verified citation only a marker at
- * the start counts (a cited answer may mention the word); without one, the marker anywhere counts.
+ * Whether the reply says the document does not answer the question. When the model emitted any citation, verified
+ * or dropped, only a marker at the start counts: a cited answer may mention the word, and a partial answer ("X
+ * [cited]. NOT_IN_DOCUMENT: Y is not stated.") whose citations were all dropped by verification is evidence of a
+ * shape mismatch, not of a missing answer (it stays `unverified`). With no citation at all, the marker anywhere counts.
  */
-export function hasNotInDocumentMarker(text: string, hasVerifiedCitation: boolean): boolean {
-  return MARKER_AT_START.test(text) || (!hasVerifiedCitation && MARKER_ANYWHERE.test(text));
+export function hasNotInDocumentMarker(text: string, modelCited: boolean): boolean {
+  return MARKER_AT_START.test(text) || (!modelCited && MARKER_ANYWHERE.test(text));
 }
 
 /** Displayed text when an answer is not grounded in the document. */
@@ -201,7 +203,7 @@ export function resolveCitations(raw: RawAnswer, sent: SentDocument[], content: 
     }
   });
 
-  const notFoundReason = hasNotInDocumentMarker(rawText, citations.length > 0)
+  const notFoundReason = hasNotInDocumentMarker(rawText, citations.length > 0 || dropped.length > 0)
     ? 'not_in_document'
     : citations.length === 0
       ? raw.stopReason === 'max_tokens'

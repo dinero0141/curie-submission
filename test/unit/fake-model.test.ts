@@ -63,6 +63,14 @@ describe('FakeModel', () => {
     expect(fake.lastRequest?.question).toBe('second');
   });
 
+  it('records nothing when built with record: false (the demo worker)', async () => {
+    const fake = new FakeModel([], { record: false });
+    const raw = await fake.generate(req('first'), () => {}, live());
+    expect(raw.blocks.length).toBeGreaterThan(0);
+    expect(fake.requests).toEqual([]);
+    expect(fake.lastRequest).toBeUndefined();
+  });
+
   it('throws scripted errors per attempt, then answers', async () => {
     const e1 = Anthropic.APIError.generate(529, { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }, undefined, new Headers());
     const e2 = new Anthropic.APIConnectionError({ message: 'reset' });

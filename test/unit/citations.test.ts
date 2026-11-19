@@ -291,6 +291,20 @@ describe('resolveCitations — not answerable', () => {
     expect(r.dropped.map((d) => d.reason)).toEqual(['cited_text_mismatch', 'document_out_of_range']);
   });
 
+  it('reports a partial answer with a mid-text marker whose citations were all dropped as unverified', () => {
+    const forged = cite(docs, results, 0, 1, 'forged cited text');
+    const r = resolveCitations(
+      answer(
+        { text: 'The pilot was owned by Mira Chen.', citations: [forged] },
+        { text: ` ${NOT_IN_DOCUMENT_MARKER} the funding is not stated.` },
+      ),
+      docs,
+      content,
+    );
+    expect(r).toMatchObject({ answerable: false, text: '', citations: [], notFoundReason: 'unverified' });
+    expect(r.dropped.map((d) => d.reason)).toEqual(['cited_text_mismatch']);
+  });
+
   it('reports a shape mismatch that drops every citation (1-based indices, other type) as unverified', () => {
     const good = cite(docs, results, 0, 1);
     const oneBased = { ...good, start_block_index: 1, end_block_index: 2 };

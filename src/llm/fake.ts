@@ -2,7 +2,8 @@
  * Scripted, offline `AnswerModel` for tests and `MODEL_PROVIDER=fake` demo mode.
  *
  * - scripts match the question by case-insensitive substring (first match wins, newest script first);
- * - every request is recorded in `requests`;
+ * - every request is recorded in `requests` (unless built with `{ record: false }`, as the long-running demo
+ *   worker is: each request holds slices of the document, which would keep every loaded copy alive);
  * - a script can fail its first attempts with given errors (`errors[n]` is thrown on attempt n + 1), before
  *   streaming or, with `midStreamErrors`, after half of the text has streamed (and after the latch);
  * - a script can be latched: it streams the first half of its text, then waits until `release()`;
@@ -86,12 +87,14 @@ export function defaultReply(req: AnswerRequest): { blocks: FakeBlock[] } {
 const MODEL_NAME = 'fake';
 
 export class FakeModel implements AnswerModel {
-  /** Every request received, in call order. */
+  /** Every request received, in call order (empty when built with `{ record: false }`). */
   readonly requests: AnswerRequest[] = [];
   private readonly scripts: ScriptState[] = [];
   private latchedListeners: ((req: AnswerRequest) => void)[] = [];
+  private readonly record: boolean;
 
-  constructor(scripts: FakeScript[] = []) {
+  constructor(scripts: FakeScript[] = [], options: { record?: boolean } = {}) {
+    this.record = options.record ?? true;
     for (const s of scripts) this.script(s);
   }
 
@@ -116,7 +119,7 @@ export class FakeModel implements AnswerModel {
   }
 
   async generate(req: AnswerRequest, onDelta: (text: string) => void, signal: AbortSignal): Promise<RawAnswer> {
-    this.requests.push(req);
+    if (this.record) this.requests.push(req);
     signal.throwIfAborted();
     const q = req.question.toLowerCase();
     const s = this.scripts.find((x) => q.includes(x.match.toLowerCase()));
