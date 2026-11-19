@@ -185,8 +185,8 @@ Integration tests use the `curie_test` database (created on first Postgres volum
 Postgres or Redis is down. All tests use the fake model. Current result: 260 tests in 18 files pass (159 unit,
 101 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
 
-`pnpm spike` (`scripts/spike-citations.ts`) dumps raw Citations responses for the sample document and needs an
-Anthropic key.
+`pnpm spike` (`scripts/spike-citations.ts`) sends the production request body (`toAnthropicParams(buildRequest(...))`)
+for the sample document, dumps the raw Citations responses, and needs an Anthropic key.
 
 ## Eval
 

@@ -79,12 +79,18 @@ packagings, so this can be compared.
 ## How to verify later
 
 1. Put `ANTHROPIC_API_KEY` in the repo-root dotenv file (or export it), with `MODEL_PROVIDER=anthropic`.
-2. Run `pnpm spike` (5 small streaming requests against the sample document; small cost).
+2. Run `pnpm spike` (5 small streaming requests against the sample document; small cost). Each request
+   is built by the production code path, `toAnthropicParams(buildRequest(...))`: the production system
+   prompt and user text, `max_tokens` = `MAX_ANSWER_TOKENS` + 4096 thinking headroom, and
+   `output_config.effort: 'medium'`. The `single` packaging and the `between_tools` thinking setting are
+   extra variants on top of that body; each run file records what was sent under `request`.
 3. Look in `docs/notes/spike-output/`:
    - `summary.json`: one row per run. Check `allInRange: true` and `allConcat: true` (`cited_text` ==
      blocks joined with no separator; if `false`, look at `checks[].citedTextEqualsSpaceJoin` in the
      run file), `multiBlock` (are there citations over several blocks?), `notInDocument: true` for the
-     `*-unanswerable` runs, and `stop: "end_turn"`. Compare `firstTextMs`/`totalMs` for the
+     `*-unanswerable` runs, and `stop: "end_turn"` (a `max_tokens` stop means thinking used up the
+     headroom: the run is inconclusive, not a shape mismatch). A run without an `error` row also confirms
+     that the API accepts `output_config.effort` and the `max_tokens` production sends. Compare `firstTextMs`/`totalMs` for the
      `between-tools` run against `per-passage-answerable`.
    - `<run>.json`: `eventTypes` should include `content_block_delta:citations_delta`.
      `finalMessage.content` shows the text-block split, any leading `thinking` block, and the raw
