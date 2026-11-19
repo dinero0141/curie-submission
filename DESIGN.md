@@ -25,6 +25,8 @@
 ## Retrieval
 
 ## Grounding and citations
+- Citations API shapes (custom-content documents, `content_block_location` with exclusive `end_block_index`, `citations_delta` folded into `finalMessage()`) come from the claude-api skill and the `@anthropic-ai/sdk` 1.10.0 types. They are **assumed, not observed live**: the build had no API key. `docs/notes/citations-spike.md` lists each fact with its source. `pnpm spike` is the check still to run. The code does not trust these shapes: indices are range-checked and every quote is rebuilt from `content.slice` and verified block by block, so a wrong assumption drops citations rather than showing wrong quotes.
+- Packaging: **one custom-content document per passage** (title = heading, one text block per sentence). Passages sent in `ranked` mode are not adjacent, and a single document would let a citation run across a gap and quote text we never sent. Per passage, a block range is always a contiguous slice of the source, and `document_index` maps straight to a passage. Documents go only in the final user message (history is plain text), so `document_index` has one meaning whichever way the API counts, and the 2026-10-21 rules against citations on user text and documents in assistant turns cannot be hit.
 
 ## Answer delivery
 
