@@ -182,6 +182,107 @@ Offset check: `samples/harbor-archive.md` (1,762 UTF-16 code units) sliced in JS
 equals the two quotes exactly (checked by the orchestrator after the run, and again with `node` when this section was
 written).
 
-Not covered by this run: the HTTP API, BullMQ worker and compose stack with Gemini; the eval; `thinkingLevel` (never
+Not covered by this run: the HTTP API, BullMQ worker and compose stack with Gemini and the eval (both run later the
+same day, [next section](#2026-11-19--live-full-stack-eval-gemini-35-flash-lite)); `thinkingLevel` (never
 sent to a model that answered); 429, `MAX_TOKENS`, blocking finish reasons, an over-long prompt. The Claude path has
 still never been called live.
+
+## 2026-11-19 — live full-stack eval, `gemini-3.5-flash-lite`
+
+**Captured live** (the orchestrator ran these; the second set of real model calls after the smoke run above). The
+whole compose stack (HTTP API, BullMQ worker, Postgres, Redis) answered with Gemini; facts this confirmed:
+[gemini-notes.md](gemini-notes.md).
+
+Setup: `MODEL_PROVIDER=gemini`, `GEMINI_MODEL=gemini-3.5-flash-lite`, key in the repo-root dotenv file (set by the
+human). The stack was started with `docker compose -p curie-doc-chat-backend up --build -d`: this machine still had the
+Postgres/Redis containers of the earlier worktree's compose project running on host ports 54329/63799, and reusing that
+project name made compose use them (and their volume) instead of starting a second pair that would clash on those
+ports. That is a local workaround, not the normal path (plain `docker compose up --build -d`); it is also why the
+database held older demo rows. Worker startup log: `"modelProvider":"gemini","model":"gemini-3.5-flash-lite","msg":"worker started"`;
+`migrate`: `migrations applied: 001_init.sql`; `GET /health` 200.
+
+`pnpm exec tsx scripts/eval.ts` (the exit code was not captured, the output was piped; the table says 7/7):
+
+```
+eval: http://localhost:3000, 7 questions from …/samples/eval-questions.json
+
+model: gemini-3.5-flash-lite
+
+result  id                  question                                                secs  detail
+------  ------------------  ------------------------------------------------------  ----  -----------------------------
+PASS    hybrid-correct      How many questions did the hybrid prototype get right?  2.1   quote contains "34 of the 40"
+PASS    keyword-followup    And keyword search?                                     1.0   quote contains "28 of the 40"
+PASS    pilot-owner         Who owned the limited pilot?                            1.0   quote contains "Mira Chen"
+PASS    next-review         When is the next review planned?                        3.0   quote contains "8 April 2026"
+PASS    hybrid-latency      What was the hybrid prototype's median response time?   1.0   quote contains "1.2 seconds"
+PASS    funding             Who funded the study?                                   3.0   not found, as expected
+PASS    production-latency  What was production-scale latency?                      1.0   not found, as expected
+
+7/7 passed
+```
+
+A PASS means (`scripts/eval-check.ts`): the answer `completed`; for answerable rows the expected substring is inside a
+citation quote, not only in the answer text; for not-found rows `answerable: false` with no citations; and every
+citation's offsets slice the stored content to its quote. `keyword-followup` was asked in the same conversation as
+`hybrid-correct`, so its history came from the database through the worker.
+
+Two live 503s recovered by the BullMQ retry. Two answers got `Gemini API 503 UNAVAILABLE: This model is currently
+experiencing high demand…` on their first attempt (the only warn-level worker lines of the run): each logged
+`answer attempt failed; will retry` with `attemptsMade: 0` and `code: model_unavailable`, then the `worker.on('failed')`
+backstop warn with `attemptsMade: 1` and `err.type: GeminiApiError`. Both answers then completed: after the run every
+assistant row was `completed` (21 rows, older demo rows included) and `sum(attempts)` was 23, so exactly two answers
+took two attempts. The two failures were about 4 s apart in the log; the retry delay of each was not measured.
+
+One real answer (`hybrid-latency`) as returned by `GET /messages/:id` (other passage ids shortened):
+
+```json
+{
+  "id": "2a36e4af-ecf3-4a04-8cae-65a611afae0f",
+  "conversationId": "eb95a303-192f-405c-bbf9-4fe9f8b4a11a",
+  "seq": 2,
+  "role": "assistant",
+  "status": "completed",
+  "content": "The median response time for the hybrid prototype was 1.2 seconds.",
+  "createdAt": "2026-11-19T19:35:19.190Z",
+  "updatedAt": "2026-11-19T19:35:20.175Z",
+  "completedAt": "2026-11-19T19:35:20.175Z",
+  "answerable": true,
+  "citations": [
+    {
+      "quote": "Median response time was 0.7 seconds for keyword search and 1.2 seconds for the hybrid prototype.",
+      "heading": "Results",
+      "answerEnd": 66,
+      "endOffset": 958,
+      "passageId": "a0e54a93-f56a-4198-8bbd-2c9934d0e85d",
+      "answerStart": 0,
+      "startOffset": 861
+    }
+  ],
+  "finishReason": "end_turn",
+  "error": null,
+  "model": "gemini-3.5-flash-lite",
+  "usage": { "serviceTier": "standard", "totalTokenCount": 990, "promptTokenCount": 872,
+             "promptTokensDetails": [{ "modality": "TEXT", "tokenCount": 872 }], "candidatesTokenCount": 118 },
+  "attempts": 1,
+  "retrieval": {
+    "hits": [], "mode": "full",
+    "debug": { "query": null, "dropped": [], "notFoundReason": null },
+    "passageIds": ["f575be89-…", "0ea503c4-…", "a0e54a93-f56a-4198-8bbd-2c9934d0e85d", "5eb5c753-…", "f7a73a82-…"],
+    "tokenEstimate": 434, "documentTokens": 434, "passageOrdinals": [0, 1, 2, 3, 4]
+  }
+}
+```
+
+Offset check: `samples/harbor-archive.md` (1,762 UTF-16 code units) sliced in JS at `[861, 958)` equals the quote
+exactly (checked by the orchestrator after the run, and again with `node` when this section was written), and
+`[answerStart, answerEnd) = [0, 66)` is the whole 66-character answer. The citation's passage is the third one sent
+(`passageIds[2]`, heading `Results`).
+
+Not covered by this run:
+- `ranked` retrieval with a real model: the sample fits the budget, so every question ran in `full` mode.
+- 429 bodies (`RetryInfo`/`QuotaFailure`), `MAX_TOKENS`, safety/recitation blocks, an over-long prompt
+  (`context_too_large`), and the reconciler under a real outage (both 503s were recovered by the BullMQ retry alone).
+- `gemini-3.8-flash` (never answered live) and `thinkingLevel`.
+- Partial content while `streaming`: with Gemini there is none by design (the JSON answer arrives whole).
+- The Claude path: still never called live.
+- The exit code of the eval CLI (piped) and the app teardown were not recorded.

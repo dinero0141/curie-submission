@@ -164,7 +164,38 @@ cites the document's first sentence):
 ```
 
 The `passageIds`, `hits` and `debug.query` fields were added with ranked retrieval after this capture; they are
-filled in here from the code (`src/jobs/generateAnswer.ts`), not re-captured over HTTP.
+filled in here from the code (`src/jobs/generateAnswer.ts`), not re-captured over HTTP with the fake model. The live
+capture below has all of them.
+
+Assistant message, `completed`, **captured live** with `MODEL_PROVIDER=gemini` (`gemini-3.5-flash-lite`, 2026-11-19,
+eval run against the compose stack; ids other than the cited passage shortened, key order as returned; full record in
+[manual-checks.md](notes/manual-checks.md#2026-11-19--live-full-stack-eval-gemini-35-flash-lite)). `usage` is
+Gemini's `usageMetadata` as returned (no `thoughtsTokenCount` on this model):
+
+```json
+{
+  "id": "2a36e4af-ecf3-4a04-8cae-65a611afae0f", "conversationId": "eb95a303-192f-405c-bbf9-4fe9f8b4a11a",
+  "seq": 2, "role": "assistant", "status": "completed",
+  "content": "The median response time for the hybrid prototype was 1.2 seconds.",
+  "createdAt": "2026-11-19T19:35:19.190Z", "updatedAt": "2026-11-19T19:35:20.175Z", "completedAt": "2026-11-19T19:35:20.175Z",
+  "answerable": true,
+  "citations": [
+    {"quote": "Median response time was 0.7 seconds for keyword search and 1.2 seconds for the hybrid prototype.",
+     "heading": "Results", "answerEnd": 66, "endOffset": 958,
+     "passageId": "a0e54a93-f56a-4198-8bbd-2c9934d0e85d", "answerStart": 0, "startOffset": 861}
+  ],
+  "finishReason": "end_turn",
+  "error": null,
+  "model": "gemini-3.5-flash-lite",
+  "usage": {"serviceTier": "standard", "totalTokenCount": 990, "promptTokenCount": 872,
+            "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 872}], "candidatesTokenCount": 118},
+  "attempts": 1,
+  "retrieval": {"hits": [], "mode": "full",
+                "debug": {"query": null, "dropped": [], "notFoundReason": null},
+                "passageIds": ["f575be89-…", "0ea503c4-…", "a0e54a93-f56a-4198-8bbd-2c9934d0e85d", "5eb5c753-…", "f7a73a82-…"],
+                "tokenEstimate": 434, "documentTokens": 434, "passageOrdinals": [0, 1, 2, 3, 4]}
+}
+```
 
 `retrieval` for a document over `FULL_CONTEXT_TOKENS` (`ranked`). Shape from `test/integration/retrieval.test.ts`
 (not captured over HTTP; ids and numbers illustrative); a follow-up's `debug.query.text` also carries the previous question:
@@ -180,7 +211,8 @@ filled in here from the code (`src/jobs/generateAnswer.ts`), not re-captured ove
 
 Assistant message, `completed` but not answerable. Shape from `src/jobs/generateAnswer.ts` and
 `test/integration/conversations.test.ts`; not captured over HTTP, because the fake model's default answer is always
-answerable. When `retrieval.mode` is `ranked` or `fallback` the model saw only part of the document, and `content`
+answerable (the live Gemini eval reached this outcome twice, `answerable: false` with no citations, but did not record
+the bodies). When `retrieval.mode` is `ranked` or `fallback` the model saw only part of the document, and `content`
 is instead "I could not find an answer to this question in the parts of the document that were searched.":
 
 ```json

@@ -11,8 +11,8 @@ text while the answer is generated.
 - Recording: **pending** (link to be added before submission; tracked in
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining))
 - Status: complete and tested end to end with a fake model, but **built without an Anthropic API key**: no real
-  Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible;
-  what has run live: [Verification status](#verification-status); what remains:
+  Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible,
+  and the eval passed with it over the full stack; what has run live: [Verification status](#verification-status); what remains:
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
 - Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–18:20 by commit times; the task
   agents themselves reported ~4 h 45), plus brainstorm/planning before that and code review after (total session
@@ -96,8 +96,15 @@ The block above (and `.env.example`) lists the variables without credentials and
 so either fill in `ANTHROPIC_API_KEY`, switch to the Gemini lines, or change the provider to `fake`. A `.env` file
 is only needed for a real provider. Compose resolves `MODEL_PROVIDER` as shell >
 `.env` > `fake` (`docker-compose.yml`), so with no `.env` at all the stack runs keyless with the fake model, and the
-worker logs a warning saying so. Inside compose, `DATABASE_URL`/`REDIS_URL` are always
+worker logs a warning saying so. The other model variables (`ANTHROPIC_*`, `GEMINI_*`, `MAX_ANSWER_TOKENS`, …) reach
+the containers only through `env_file: .env`, so put them in the file: a value exported only in the shell is not
+passed in. Inside compose, `DATABASE_URL`/`REDIS_URL` are always
 the in-network addresses; the `.env` values are for local runs.
+
+If `docker compose up` fails with "port is already allocated" on 54329 or 63799, another compose project (for example
+an older checkout or worktree of this repo) still has its Postgres/Redis running on those host ports: stop it
+(`docker compose -p <that project> down`), or start this stack under that project's name with
+`docker compose -p <that project> up --build -d` to reuse its containers and database.
 
 With `MODEL_PROVIDER=gemini` an answer has no partial text: it stays `streaming` with empty `content` until it
 completes (the JSON answer arrives whole).
@@ -169,7 +176,8 @@ jq slices by code point, not UTF-16 unit; that is the same for this ASCII sample
 **Not found.** A question the document does not answer (e.g. "Who funded the study?") completes with
 `"answerable": false`, `"citations": []` and `"content": "I could not find an answer to this question in the
 document."` (for a document too large to send whole, the message says only the searched parts were checked). With the fake model this outcome is only reachable through scripted tests
-(`test/integration/conversations.test.ts`); it has not been seen with real Claude (see below).
+(`test/integration/conversations.test.ts`); over HTTP it was seen with Gemini in the live eval (two unanswerable
+questions, see [Verification status](#verification-status)), never with real Claude.
 
 More responses (errors, 404s, a failed document) are in [docs/notes/manual-checks.md](docs/notes/manual-checks.md)
 and [docs/API.md](docs/API.md).
@@ -238,11 +246,11 @@ slicing the stored content to its quote. It prints a table and exits 1 if any an
 fails: API down, document failed, timeout). The assertions (`scripts/eval-check.ts`) are unit-tested, and the
 harness runs in `pnpm test` against a listening app with the fake model (`test/integration/eval-harness.test.ts`).
 
-**Results: not yet run.** No Anthropic key was available for this build, so the eval has never run against real
-Claude, and it has not been run against Gemini yet (only `pnpm smoke` has). It was run once against the compose stack with `MODEL_PROVIDER=fake` to check the harness only: it ran end
-to end and reported 0/7, as expected, because the fake model cites the document's first sentence for every question
-(exit code 1; an unreachable `EVAL_BASE_URL` gives exit code 2). The sample document is sent whole (`full` mode), so
-the eval does not cover `ranked` retrieval.
+**Results:** 7/7 with Gemini (`gemini-3.5-flash-lite`) against the compose stack on 2026-11-19, see
+[Verification status](#verification-status); never run against real Claude (no Anthropic key). Against the fake model
+(harness check only) it reports 0/7 with exit code 1, as expected, because the demo model cites the document's first
+sentence for every question; an unreachable `EVAL_BASE_URL` gives exit code 2. The sample document is sent whole
+(`full` mode), so the eval does not cover `ranked` retrieval.
 
 ## Verification status
 
@@ -258,6 +266,12 @@ Verified:
   "28 of the 40", the not-found budget question, and the follow-up (with history) verified for "34 of the 40"; both
   quotes' offsets slice the sample to the quote exactly, and no citation was dropped
   ([output](docs/notes/manual-checks.md#2026-11-19--live-gemini-smoke-run-gemini-35-flash-lite)).
+- **Live Gemini, the eval on 2026-11-19: 7/7 passed on `gemini-3.5-flash-lite` against the full compose stack**
+  (HTTP API, BullMQ worker, Postgres, Redis): five answerable questions, including the follow-up "And keyword
+  search?" in the same conversation, each with a verified quote containing the expected text at offsets that slice the
+  stored content to it, and both unanswerable questions as not found. Two answers hit a live 503 UNAVAILABLE on their
+  first attempt and completed on the BullMQ retry
+  ([table, logs and a real `GET /messages/:id` response](docs/notes/manual-checks.md#2026-11-19--live-full-stack-eval-gemini-35-flash-lite)).
 
 Not verified:
 - **No real Claude call was ever made.** `AnthropicModel` typechecks against `@anthropic-ai/sdk` 1.10.0 and its
@@ -268,23 +282,24 @@ Not verified:
   wrong, citation verification drops the quotes and the answer fails with `citations_unverified` (logged by the
   worker with each drop reason); it cannot show a quote that is not in the document, and it is never reported as
   "not in the document".
-- `pnpm spike` has not been run, and `pnpm eval` has not been run against real Claude (only against the fake model,
-  to check the harness); answer quality, `NOT_IN_DOCUMENT:` adherence and real latency are unknown. Real API error bodies (over-long prompt, 529, refusal) were not observed.
+- `pnpm spike` has not been run, and `pnpm eval` has not been run against real Claude; Claude's answer quality,
+  `NOT_IN_DOCUMENT:` adherence and real latency are unknown. Real Claude error bodies (over-long prompt, 529, refusal)
+  were not observed.
 - Ranked retrieval for documents larger than `FULL_CONTEXT_TOKENS` is tested against real Postgres full-text
-  search on a synthetic document, with `FakeModel` only; it has not been tried with the real model or a real long
-  paper (the sample document is small enough to be sent whole).
-- `docker compose up` with `MODEL_PROVIDER=anthropic`, a `.env` overriding the `fake` default, load, and many
-  concurrent workers/pollers.
-- **Gemini beyond one smoke run.** The smoke run called the model directly, so the HTTP API, BullMQ worker and
-  compose stack have not run with Gemini, and the eval has not run. Not observed: `thinkingLevel` on
-  `gemini-3.8-flash` (it only ever answered 503), 429 bodies (`RetryInfo`/`QuotaFailure`), `MAX_TOKENS`,
-  safety/recitation blocks, an over-long prompt. Which API facts the run confirmed and which stay UNVERIFIED:
-  [docs/notes/gemini-notes.md](docs/notes/gemini-notes.md).
+  search on a synthetic document, with `FakeModel` only; it has not been tried with a real model (Claude or Gemini)
+  or a real long paper (the sample document is small enough to be sent whole).
+- `docker compose up` with `MODEL_PROVIDER=anthropic`, load, and many concurrent workers/pollers. A `.env` value
+  overriding the compose `fake` default is consistent with the Gemini eval (the file sets `MODEL_PROVIDER=gemini`),
+  but that run did not record whether the shell also set it.
+- **Gemini beyond the happy path.** Not observed: 429 bodies
+  (`RetryInfo`/`QuotaFailure`), `MAX_TOKENS`, safety/recitation blocks, an over-long prompt (`context_too_large`), the
+  reconciler under a real outage, and `gemini-3.8-flash` / `thinkingLevel` (it only ever answered 503). Which API
+  facts the live runs confirmed and which stay UNVERIFIED: [docs/notes/gemini-notes.md](docs/notes/gemini-notes.md).
 
-Next with the Gemini key: the eval against the compose stack
-([docs/notes/gemini-notes.md § How to verify](docs/notes/gemini-notes.md#how-to-verify), step 5). To verify with an Anthropic key: set `MODEL_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in
+To verify with an Anthropic key: set `MODEL_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in
 `.env`, run `pnpm spike` and compare
 `docs/notes/spike-output/` with the facts in `docs/notes/citations-spike.md`, then run `pnpm eval` against
-`docker compose up --build` and record its table under [Eval](#eval). This is the first item of the remaining work;
+`docker compose up --build` and record its table in
+[docs/notes/manual-checks.md](docs/notes/manual-checks.md) and here. This is the first item of the remaining work;
 the rest (SSE, query rewrite, hybrid ranking, `retry-after`, PDF, auth) is listed in priority order in
 [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
