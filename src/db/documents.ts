@@ -84,23 +84,36 @@ export async function markDocumentProcessing(q: Queryable, id: string): Promise<
   return (res.rowCount ?? 0) > 0;
 }
 
-export async function markDocumentReady(q: Queryable, id: string, passageCount: number): Promise<void> {
-  await q.query(
+/** Move an in-flight document to `ready`. Returns false when it is already terminal (or missing). */
+export async function markDocumentReady(q: Queryable, id: string, passageCount: number): Promise<boolean> {
+  const res = await q.query(
     `UPDATE documents
      SET status = 'ready', passage_count = $2, failure_code = NULL, failure_message = NULL,
          ready_at = now(), updated_at = now()
-     WHERE id = $1`,
+     WHERE id = $1 AND status IN ('pending', 'processing')`,
     [id, passageCount],
   );
+  return (res.rowCount ?? 0) > 0;
 }
 
-export async function markDocumentFailed(q: Queryable, id: string, code: string, message: string): Promise<void> {
-  await q.query(
+/** Move an in-flight document to `failed`. Returns false when it is already terminal (or missing). */
+export async function markDocumentFailed(q: Queryable, id: string, code: string, message: string): Promise<boolean> {
+  const res = await q.query(
     `UPDATE documents
      SET status = 'failed', failure_code = $2, failure_message = $3, updated_at = now()
-     WHERE id = $1`,
+     WHERE id = $1 AND status IN ('pending', 'processing')`,
     [id, code, message],
   );
+  return (res.rowCount ?? 0) > 0;
+}
+
+/**
+ * Lock the document row (`SELECT ... FOR UPDATE`) inside a transaction and return its status,
+ * so concurrent preparation runs of the same document serialize their final write.
+ */
+export async function lockDocumentStatus(q: Queryable, id: string): Promise<DocumentStatus | null> {
+  const res = await q.query(`SELECT status FROM documents WHERE id = $1 FOR UPDATE`, [id]);
+  return (res.rows[0]?.status as DocumentStatus | undefined) ?? null;
 }
 
 /** In-flight documents not touched for `olderThanMs` (reconciler input). */

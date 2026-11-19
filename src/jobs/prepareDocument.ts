@@ -1,0 +1,129 @@
+/**
+ * prepare-document processor: `pending|processing` → chunk → one transaction (replace passages, `ready`).
+ *
+ * Final-state rule: the processor itself writes the terminal `failed` state — immediately for permanent
+ * errors (`ChunkingError`: `empty_after_parse`, `too_many_passages`, rethrown as `UnrecoverableError`
+ * so BullMQ does not retry), and on the last attempt for anything else (`preparation_error`).
+ * `worker.on('failed')` is only a logging backstop.
+ */
+import { UnrecoverableError, Worker, type Job } from 'bullmq';
+import type { Redis } from 'ioredis';
+import type pg from 'pg';
+import type { Logger } from 'pino';
+import {
+  getDocument,
+  lockDocumentStatus,
+  markDocumentFailed,
+  markDocumentProcessing,
+  markDocumentReady,
+} from '../db/documents.js';
+import { replacePassages } from '../db/passages.js';
+import { withTx } from '../db/pool.js';
+import { ChunkingError, chunkDocument } from '../domain/chunking.js';
+import { QUEUE_NAMES, type PrepareDocumentJobData } from './queues.js';
+
+/**
+ * Upper bound on passages per document. A 5 MB document of ~400-token passages is ~3,300 passages;
+ * this only trips on pathological input (e.g. a heading every few words), which fails permanently.
+ */
+export const MAX_PASSAGES = 20_000;
+
+export type PrepareDocumentDeps = {
+  pool: pg.Pool;
+  passageTokens: number;
+  maxPassages?: number;
+  /** Injectable for tests (transient-failure scenarios); defaults to `chunkDocument`. */
+  chunk?: typeof chunkDocument;
+  log?: Pick<Logger, 'info' | 'warn' | 'error'>;
+};
+
+export type PrepareDocumentResult =
+  | { outcome: 'ready'; passageCount: number }
+  | { outcome: 'skipped'; reason: 'missing' | 'terminal' };
+
+/** True when this run is the job's last allowed attempt (`attemptsMade` counts finished attempts). */
+export function isFinalAttempt(job: Pick<Job, 'attemptsMade' | 'opts'>): boolean {
+  return job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message || err.name : String(err);
+}
+
+export function createPrepareDocumentProcessor(deps: PrepareDocumentDeps) {
+  const chunk = deps.chunk ?? chunkDocument;
+  const maxPassages = deps.maxPassages ?? MAX_PASSAGES;
+
+  return async function prepareDocument(
+    job: Pick<Job<PrepareDocumentJobData>, 'data' | 'attemptsMade' | 'opts' | 'id'>,
+  ): Promise<PrepareDocumentResult> {
+    const { documentId } = job.data;
+    try {
+      // Guarded transition: a stale rerun of a ready/failed document does nothing.
+      if (!(await markDocumentProcessing(deps.pool, documentId))) {
+        const exists = (await getDocument(deps.pool, documentId)) !== null;
+        return { outcome: 'skipped', reason: exists ? 'terminal' : 'missing' };
+      }
+      const doc = await getDocument(deps.pool, documentId);
+      if (!doc) return { outcome: 'skipped', reason: 'missing' };
+
+      const passages = chunk(doc.content, doc.format, { passageTokens: deps.passageTokens, maxPassages });
+
+      return await withTx(deps.pool, async (tx) => {
+        // Serialize with any concurrent run (or reconciler write) on the same row.
+        const status = await lockDocumentStatus(tx, documentId);
+        if (status !== 'pending' && status !== 'processing') {
+          return { outcome: 'skipped', reason: status === null ? 'missing' : 'terminal' } as const;
+        }
+        await replacePassages(tx, documentId, passages); // delete + insert: reruns are idempotent
+        await markDocumentReady(tx, documentId, passages.length);
+        return { outcome: 'ready', passageCount: passages.length } as const;
+      });
+    } catch (err) {
+      const permanent = err instanceof ChunkingError;
+      if (permanent || isFinalAttempt(job)) {
+        const code = permanent ? err.code : 'preparation_error';
+        const message = permanent ? err.message : `document preparation failed: ${messageOf(err)}`;
+        try {
+          await markDocumentFailed(deps.pool, documentId, code, message);
+        } catch (writeErr) {
+          // Row stays in flight; the reconciler marks it failed once the job is seen as failed.
+          deps.log?.error({ documentId, err: writeErr }, 'could not record document failure');
+        }
+      }
+      if (permanent) throw new UnrecoverableError(`${err.code}: ${err.message}`);
+      throw err;
+    }
+  };
+}
+
+export type PrepareDocumentWorkerOptions = {
+  prefix?: string;
+  concurrency?: number;
+};
+
+export function createPrepareDocumentWorker(
+  connection: Redis,
+  deps: PrepareDocumentDeps,
+  opts: PrepareDocumentWorkerOptions = {},
+): Worker<PrepareDocumentJobData, PrepareDocumentResult> {
+  const processor = createPrepareDocumentProcessor(deps);
+  const worker = new Worker<PrepareDocumentJobData, PrepareDocumentResult>(
+    QUEUE_NAMES.prepareDocument,
+    (job) => processor(job),
+    {
+      connection,
+      concurrency: opts.concurrency ?? 2,
+      ...(opts.prefix ? { prefix: opts.prefix } : {}),
+    },
+  );
+  // Logging backstop only: terminal row state was already written by the processor.
+  worker.on('failed', (job, err) => {
+    deps.log?.warn(
+      { documentId: job?.data.documentId, attemptsMade: job?.attemptsMade, err: messageOf(err) },
+      'prepare-document attempt failed',
+    );
+  });
+  worker.on('error', (err) => deps.log?.error({ err }, 'prepare-document worker error'));
+  return worker;
+}
