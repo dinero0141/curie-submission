@@ -182,7 +182,7 @@ pnpm typecheck
 ```
 
 Integration tests use the `curie_test` database (created on first Postgres volume init) and fail fast with a hint if
-Postgres or Redis is down. All tests use the fake model. Current result: 260 tests in 18 files pass (159 unit,
+Postgres or Redis is down. All tests use the fake model. Current result: 264 tests in 18 files pass (163 unit,
 101 integration). What each level covers is in [DESIGN.md § Verification](DESIGN.md#verification).
 
 `pnpm spike` (`scripts/spike-citations.ts`) sends the production request body (`toAnthropicParams(buildRequest(...))`)
@@ -215,7 +215,7 @@ the eval does not cover `ranked` retrieval.
 This build had **no Anthropic API key** (a deliberate decision to continue keyless). So:
 
 Verified:
-- `pnpm typecheck` and `pnpm test`: 260/260 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
+- `pnpm typecheck` and `pnpm test`: 264/264 passing, all against `FakeModel`, with real Postgres, Redis and BullMQ
   workers in the integration tests.
 - The example flow above, over HTTP against the compose stack with `MODEL_PROVIDER=fake`: upload → ready → ask →
   poll → follow-up → offsets slice the stored content; plus 400/404/409/415 responses and a failed document
