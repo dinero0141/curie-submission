@@ -357,7 +357,7 @@ describe('enqueue failures on the request path', () => {
     const slowApp = buildApp({
       pool: env.pool,
       config: { maxDocumentBytes: MAX_BYTES, bodyLimitBytes: MAX_BYTES * 1.5 },
-      queues: { prepareDocument: stuck },
+      queues: { prepareDocument: stuck, generateAnswer: queues.generateAnswer },
       enqueueTimeoutMs: 50,
     });
     try {

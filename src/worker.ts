@@ -1,9 +1,11 @@
-/** Worker entrypoint: BullMQ processors (prepare-document; generate-answer and the reconciler come later). */
+/** Worker entrypoint: BullMQ processors (prepare-document, generate-answer; the reconciler comes later). */
 import { pino } from 'pino';
 import { loadConfig } from './config.js';
 import { createPool } from './db/pool.js';
+import { createGenerateAnswerWorker } from './jobs/generateAnswer.js';
 import { createPrepareDocumentWorker } from './jobs/prepareDocument.js';
 import { createRedisConnection } from './jobs/queues.js';
+import { createAnswerModel } from './llm/index.js';
 import { loadEnvFile } from './loadEnv.js';
 
 // First statement: the modules above only read the environment when called.
@@ -14,8 +16,17 @@ const config = loadConfig();
 const pool = createPool(config.databaseUrl);
 const redis = createRedisConnection(config.redisUrl);
 
-const workers = [createPrepareDocumentWorker(redis, { pool, passageTokens: config.passageTokens, log })];
-log.info({ queues: workers.map((w) => w.name) }, 'worker started');
+const model = createAnswerModel(config);
+
+const workers = [
+  createPrepareDocumentWorker(redis, { pool, passageTokens: config.passageTokens, log }),
+  createGenerateAnswerWorker(redis, { pool, model, fullContextTokens: config.fullContextTokens, log }),
+];
+log.info(
+  { queues: workers.map((w) => w.name), modelProvider: model.provider, ...(model.provider === 'anthropic' ? { model: config.anthropicModel } : {}) },
+  'worker started',
+);
+if (model.provider === 'fake') log.warn('MODEL_PROVIDER=fake: answers come from the scripted demo model, not Claude');
 
 let closing = false;
 async function shutdown(signal: string): Promise<void> {

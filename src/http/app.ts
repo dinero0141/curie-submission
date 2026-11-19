@@ -4,12 +4,14 @@ import type pg from 'pg';
 import type { Config } from '../config.js';
 import type { Queues } from '../jobs/queues.js';
 import { envelope, toHttpError } from './errors.js';
+import { registerConversationRoutes } from './routes/conversations.js';
 import { registerDocumentRoutes } from './routes/documents.js';
+import { registerMessageRoutes } from './routes/messages.js';
 
 export type AppDeps = {
   pool: pg.Pool;
   config: Pick<Config, 'maxDocumentBytes' | 'bodyLimitBytes'>;
-  queues: Pick<Queues, 'prepareDocument'>;
+  queues: Pick<Queues, 'prepareDocument' | 'generateAnswer'>;
   /** Fastify logger option; tests pass `false`. */
   logger?: FastifyServerOptions['logger'];
   /** Max wait for an enqueue on the request path before deferring to the reconciler (default 2 s). */
@@ -35,5 +37,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   app.get('/health', async () => ({ ok: true }));
   registerDocumentRoutes(app, deps);
+  registerConversationRoutes(app, deps);
+  registerMessageRoutes(app, deps);
   return app;
 }

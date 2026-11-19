@@ -1,0 +1,14 @@
+.git
+.claude
+node_modules
+dist
+coverage
+docs
+test
+scripts
+samples
+*.log
+.DS_Store
+# Never send local secrets into the build context.
+.env
+.env.*

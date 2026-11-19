@@ -9,6 +9,7 @@ Rules given to the coding agents that implement this repo. The plan lives in `do
 - Dependency build scripts are allow-listed in `pnpm-workspace.yaml` (`allowBuilds`: esbuild, msgpackr-extract); add new ones there deliberately.
 - Local scripts auto-load the repo-root dotenv file if present: entrypoints and `scripts/*.ts` (and the `src/db/migrate.ts` CLI) call `loadEnvFile()` from `src/loadEnv.ts` (Node's built-in `process.loadEnvFile`, never overrides variables already set, never throws). Never import it from `src/config.ts` or from tests — tests stay hermetic. Package scripts carry no env-file flags.
 - Local services: `docker compose up -d postgres redis` (host ports 54329 / 63799). The `curie_test` database is created on first volume init by `docker/postgres-init.sql`.
+- Full stack: `docker compose up --build` (migrate → api on :3000 + worker, one image). `MODEL_PROVIDER` defaults to `fake` in compose (shell > dotenv > `fake`). Stop the app containers afterwards (`docker compose rm -sf api worker migrate`) and `docker image prune -f`; disk is tight.
 
 ## Invariants
 - Offsets are UTF-16 code units (JS string indices), half-open `[start, end)`, into the original `documents.content`. Content is never mutated after insert.

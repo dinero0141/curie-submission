@@ -1,6 +1,25 @@
-# Local dev services. The api/worker/migrate services added later load `.env` via
-#   env_file: [{ path: .env, required: false }]
-# so a missing .env never breaks `docker compose up`.
+# Full stack: `docker compose up --build` (api on http://localhost:3000).
+# Local dev / tests only need the data services: `docker compose up -d postgres redis`.
+#
+# App services read the repo-root `.env` if it exists (`required: false`: a missing file is fine).
+# `environment:` below wins over that file, so the in-network database/Redis URLs always apply.
+#
+# MODEL_PROVIDER: shell value > `.env` value (compose reads `.env` for `${...}` interpolation) > `fake`.
+# So with no `.env` (or no MODEL_PROVIDER in it) the stack runs keyless with the scripted demo model.
+# For real Claude answers set MODEL_PROVIDER=anthropic and ANTHROPIC_API_KEY in `.env`.
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://curie:curie@postgres:5432/curie
+  REDIS_URL: redis://redis:6379
+  MODEL_PROVIDER: ${MODEL_PROVIDER:-fake}
+
+x-app: &app
+  image: curie-app:local
+  build: .
+  env_file:
+    - path: .env
+      required: false
+
 services:
   postgres:
     image: postgres:16
@@ -30,6 +49,48 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  migrate:
+    <<: *app
+    command: ["node", "dist/db/migrate.js"]
+    environment:
+      <<: *app-env
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["node", "dist/api.js"]
+    environment:
+      <<: *app-env
+      PORT: "3000"
+    ports:
+      - "${API_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *app
+    command: ["node", "dist/worker.js"]
+    environment:
+      <<: *app-env
+    # Lets active jobs finish (processors write terminal state) before SIGKILL.
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:
