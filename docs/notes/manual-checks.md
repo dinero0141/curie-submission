@@ -104,7 +104,7 @@ Still not seen over HTTP: a not-found answer (the fake's default answer always c
 
 ## 2026-11-19 — fresh-clone check of the README, `MODEL_PROVIDER=fake` (Task 13, keyless run)
 
-Setup: `git clone` of the worktree's committed state (`e913283`) into a scratch directory, with the worktree's own
+Setup: `git clone` of the worktree's committed state (`dbc4b33`) into a scratch directory, with the worktree's own
 compose stack stopped first to free the ports. The clone has no dotenv file and no `.env.example` (that file was
 still uncommitted at this point; the user commits it), so the README's optional `cp` step was skipped. Then, in the
 clone:

@@ -184,29 +184,29 @@ figure). "Commit" is the wall-clock time of the task's commit and the gap since 
 git. The two differ: the agent figures are about twice the commit gaps, so they read as estimates, and the commit
 gaps are the better measurement of implementation time.
 
-| Task | Plan estimate | Agent-reported | Commit (gap) |
+| Task | Plan estimate | Agent-reported | Commit, UTC (gap) |
 |---|---|---|---|
-| Design brainstorm + plan + automated plan review | — | not recorded | plan committed 16:10 |
-| 1 Scaffold | 15 min | ~35 min (incl. disk-full stop) | 16:46 (36 min) |
-| 2 Schema + repositories | 10 | ~15 | 16:50 (4) |
-| 3 Chunking | 30 | ~25 | 16:56 (6) |
-| 4 Citations spike (keyless) | 10 | ~25 over two runs | 17:02, 17:11 (15) |
-| 5 Citation mapping | 20 | ~10 | 17:14 (3) |
-| 6 Model integration | 25 | ~25 | 17:24 (10) |
-| 7 Document API + worker | 25 | ~20 | 17:31 (7) |
-| 8 Conversations, thin path, Docker | 30 | ~25 | 17:40 (9) |
-| 9 Failure handling + reconciler | 20 | ~20 | 17:46 (6) |
-| 10 Docs draft | 35 | ~20 | 17:55 (9) |
-| 11 Ranked retrieval | 20 | ~20 | 18:02 (7) |
-| 12 Eval harness (live run not possible, keyless) | 10 | ~15 | 18:10 (8) |
-| 13 Acceptance check + fresh-clone run | 10 | ~15 | 18:16 (6) |
-| 14 Final docs | 15 | ~15 | 18:20 (4) |
-| **Tasks 1–14 total** | **275 min** | **~285 min (4 h 45)** | **130 min (16:10–18:20)** |
+| Design brainstorm + plan + automated plan review | — | not recorded | plan committed 14:10 (that commit is not in the submitted history) |
+| 1 Scaffold | 15 min | ~35 min (incl. disk-full stop) | 14:46 (36 min) |
+| 2 Schema + repositories | 10 | ~15 | 14:50 (4) |
+| 3 Chunking | 30 | ~25 | 14:56 (6) |
+| 4 Citations spike (keyless) | 10 | ~25 over two runs | 15:02, 15:11 (15) |
+| 5 Citation mapping | 20 | ~10 | 15:14 (3) |
+| 6 Model integration | 25 | ~25 | 15:24 (10) |
+| 7 Document API + worker | 25 | ~20 | 15:31 (7) |
+| 8 Conversations, thin path, Docker | 30 | ~25 | 15:40 (9) |
+| 9 Failure handling + reconciler | 20 | ~20 | 15:46 (6) |
+| 10 Docs draft | 35 | ~20 | 15:55 (9) |
+| 11 Ranked retrieval | 20 | ~20 | 16:02 (7) |
+| 12 Eval harness (live run not possible, keyless) | 10 | ~15 | 16:10 (8) |
+| 13 Acceptance check + fresh-clone run | 10 | ~15 | 16:16 (6) |
+| 14 Final docs | 15 | ~15 | 16:20 (4) |
+| **Tasks 1–14 total** | **275 min** | **~285 min (4 h 45)** | **130 min (14:10–16:20 UTC)** |
 
 Total session time (brainstorm through review) was not recorded; the "past the 4 h target" behind the SSE decision
 counts that whole session, not only the 130 min of commits. Not in the table: the brainstorm and plan writing before the plan commit, the automated plan review, the human's own
 review time, the code-review phases that follow the tasks, and the recording. Environment incidents cost extra time:
-a full disk (the Task 1 agent stopped at 16:17 and resumed after the human approved clearing the npm cache, inside
+a full disk (the Task 1 agent stopped at 14:17 UTC and resumed after the human approved clearing the npm cache, inside
 Task 1's 36 min) and a hung Docker Desktop backend that had to be force-restarted.
 
 ## Complete vs remaining

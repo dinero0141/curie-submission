@@ -14,7 +14,7 @@ text while the answer is generated.
   Claude call has been made. A second real provider, Google Gemini (free tier), was added so a live run is possible,
   and has run live; results: [Verification status](#verification-status); what remains:
   [DESIGN.md § Complete vs remaining](DESIGN.md#complete-vs-remaining).
-- Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (16:10–18:20 by commit times; the task
+- Time: about 2 h 10 of wall-clock implementation time across 14 plan tasks (14:10–16:20 UTC by commit times; the first, the plan commit, is not in the submitted history; the task
   agents themselves reported ~4 h 45), plus brainstorm/planning before that and code review after (total session
   time was not recorded). Breakdown in
   [DESIGN.md § Implementation plan and time log](DESIGN.md#implementation-plan-and-time-log).
